@@ -20,7 +20,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install dependencies
-        run: pip install ruff pytest
+        run: pip install -r requirements-dev.txt
       - name: Lint
         run: ruff check .
       - name: Test
