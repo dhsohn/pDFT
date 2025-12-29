@@ -518,9 +518,14 @@ def compute_frequencies(
     harmonic = pyscf_thermo.harmonic_analysis(mol_freq, hess, imaginary_freq=False)
     freq_wavenumber = None
     freq_au = None
+    zpe = None
     if harmonic:
         freq_wavenumber = harmonic.get("freq_wavenumber")
         freq_au = harmonic.get("freq_au")
+        for key in ("zpe", "ZPE", "zero_point_energy", "zero_point_energy_hartree", "zpve", "ZPVE"):
+            if key in harmonic:
+                zpe = harmonic.get(key)
+                break
 
     def _to_list(values):
         if values is None:
@@ -529,8 +534,16 @@ def compute_frequencies(
             return values.tolist()
         return list(values)
 
+    def _to_scalar(value):
+        if value is None:
+            return None
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        return value
+
     freq_wavenumber_list = _to_list(freq_wavenumber)
     freq_au_list = _to_list(freq_au)
+    zpe_value = _to_scalar(zpe)
     imaginary_count = None
     imaginary_status = None
     imaginary_message = None
@@ -566,6 +579,7 @@ def compute_frequencies(
         "cycles": _extract_step_count(mf_freq),
         "frequencies_wavenumber": freq_wavenumber_list,
         "frequencies_au": freq_au_list,
+        "zpe": zpe_value,
         "imaginary_count": imaginary_count,
         "imaginary_check": {
             "status": imaginary_status,
