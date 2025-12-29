@@ -139,6 +139,28 @@ def _normalize_dispersion_settings(stage_label, xc, dispersion_model, allow_disp
     return normalized
 
 
+def _frequency_units():
+    return {
+        "frequencies_wavenumber": "cm^-1",
+        "frequencies_au": "a.u.",
+        "energy": "Hartree",
+        "zpe": "Hartree",
+        "min_frequency": "cm^-1",
+        "max_frequency": "cm^-1",
+        "dispersion_energy_hartree": "Hartree",
+        "dispersion_energy_ev": "eV",
+    }
+
+
+def _frequency_versions():
+    return {
+        "ase": get_package_version("ase"),
+        "pyscf": get_package_version("pyscf"),
+        "dftd3": get_package_version("dftd3"),
+        "dftd4": get_package_version("dftd4"),
+    }
+
+
 def _normalize_frequency_dispersion_mode(mode_value):
     if mode_value is None:
         return "none"
@@ -2278,6 +2300,8 @@ def main():
                         frequency_payload = {
                             "status": "completed",
                             "output_file": frequency_output_path,
+                            "units": _frequency_units(),
+                            "versions": _frequency_versions(),
                             "basis": calc_basis,
                             "xc": calc_xc,
                             "scf": calc_scf_config,
@@ -2665,6 +2689,8 @@ def main():
                     frequency_payload = {
                         "status": "completed",
                         "output_file": frequency_output_path,
+                        "units": _frequency_units(),
+                        "versions": _frequency_versions(),
                         "basis": sp_basis,
                         "xc": sp_xc,
                         "scf": sp_scf_config,
@@ -2685,6 +2711,8 @@ def main():
                         "status": "failed",
                         "output_file": frequency_output_path,
                         "reason": failure_reason,
+                        "units": _frequency_units(),
+                        "versions": _frequency_versions(),
                         "basis": sp_basis,
                         "xc": sp_xc,
                         "scf": sp_scf_config,
@@ -2705,6 +2733,8 @@ def main():
                     "status": "skipped",
                     "output_file": frequency_output_path,
                     "reason": "Frequency calculation disabled.",
+                    "units": _frequency_units(),
+                    "versions": _frequency_versions(),
                     "results": None,
                 }
                 with open(frequency_output_path, "w", encoding="utf-8") as handle:
