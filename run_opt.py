@@ -2680,9 +2680,11 @@ def main():
                     optimization_metadata["frequency"] = frequency_payload
                 except Exception as exc:
                     logging.exception("Frequency calculation failed.")
-                    optimization_metadata["frequency"] = {
+                    failure_reason = str(exc) or "Frequency calculation failed."
+                    frequency_payload = {
                         "status": "failed",
                         "output_file": frequency_output_path,
+                        "reason": failure_reason,
                         "basis": sp_basis,
                         "xc": sp_xc,
                         "scf": sp_scf_config,
@@ -2691,9 +2693,23 @@ def main():
                         "solvent_eps": sp_eps,
                         "dispersion": freq_dispersion_model,
                         "dispersion_mode": freq_dispersion_mode,
+                        "results": None,
                         "error": str(exc),
                         "traceback": traceback.format_exc(),
                     }
+                    with open(frequency_output_path, "w", encoding="utf-8") as handle:
+                        json.dump(frequency_payload, handle, indent=2)
+                    optimization_metadata["frequency"] = frequency_payload
+            else:
+                frequency_payload = {
+                    "status": "skipped",
+                    "output_file": frequency_output_path,
+                    "reason": "Frequency calculation disabled.",
+                    "results": None,
+                }
+                with open(frequency_output_path, "w", encoding="utf-8") as handle:
+                    json.dump(frequency_payload, handle, indent=2)
+                optimization_metadata["frequency"] = frequency_payload
             run_single_point = False
             if single_point_enabled:
                 if frequency_enabled:
