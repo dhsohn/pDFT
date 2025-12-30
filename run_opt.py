@@ -520,13 +520,21 @@ def _run_ase_optimizer(
         def calculate(self, atoms=None, properties=None, system_changes=all_changes):
             super().calculate(atoms, properties, system_changes)
             atom_spec = _build_atom_spec_from_ase(atoms)
-            mol = gto.M(
-                atom=atom_spec,
-                basis=basis,
-                charge=charge,
-                spin=spin,
-                unit="Angstrom",
-            )
+            try:
+                mol = gto.M(
+                    atom=atom_spec,
+                    basis=basis,
+                    charge=charge,
+                    spin=spin,
+                    unit="Angstrom",
+                )
+            except FileNotFoundError as exc:
+                if "pople-basis" in str(exc):
+                    raise FileNotFoundError(
+                        f"{exc}\nMissing PySCF basis data. Run: "
+                        f"python scripts/restore_pyscf_basis.py --basis {basis}"
+                    ) from exc
+                raise
             if memory_mb:
                 mol.max_memory = memory_mb
             if ks_type == "RKS":
