@@ -271,7 +271,20 @@ def run_doctor():
     print("OK  all checks passed")
 
 
-def run(args, config: RunConfig, config_raw, config_source_path, run_in_background):
+def _normalize_stage_flags(config, calculation_mode):
+    frequency_enabled = config.frequency_enabled
+    single_point_enabled = config.single_point_enabled
+    if calculation_mode != "optimization":
+        frequency_enabled = False
+        single_point_enabled = False
+    if frequency_enabled is None and calculation_mode == "optimization":
+        frequency_enabled = True
+    if single_point_enabled is None:
+        single_point_enabled = True
+    return frequency_enabled, single_point_enabled
+
+
+def prepare_run_context(args, config: RunConfig, config_raw):
     config_dict = config.to_dict()
     calculation_mode = _normalize_calculation_mode(config.calculation_mode)
     basis = config.basis
@@ -289,15 +302,9 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
         )
     solvent_map_path = config.solvent_map or DEFAULT_SOLVENT_MAP_PATH
     single_point_config = config.single_point
-    frequency_enabled = config.frequency_enabled
-    single_point_enabled = config.single_point_enabled
-    if calculation_mode != "optimization":
-        frequency_enabled = False
-        single_point_enabled = False
-    if frequency_enabled is None and calculation_mode == "optimization":
-        frequency_enabled = True
-    if single_point_enabled is None:
-        single_point_enabled = True
+    frequency_enabled, single_point_enabled = _normalize_stage_flags(
+        config, calculation_mode
+    )
     if not basis:
         raise ValueError("Config must define 'basis' in the JSON config file.")
     if not xc:
@@ -345,66 +352,938 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
     if event_log_path:
         event_log_path = format_log_path(event_log_path)
         ensure_parent_dir(event_log_path)
-    if run_in_background:
-        queued_at = datetime.now().isoformat()
-        queue_priority = args.queue_priority
-        max_runtime_seconds = args.queue_max_runtime
-        queued_metadata = {
-            "status": "queued",
-            "run_directory": run_dir,
-            "run_id": run_id,
-            "xyz_file": args.xyz_file,
-            "config_file": args.config,
-            "run_metadata_file": run_metadata_path,
-            "log_file": log_path,
-            "event_log_file": event_log_path,
-            "queued_at": queued_at,
+
+    return {
+        "config_dict": config_dict,
+        "config_raw": config_raw,
+        "calculation_mode": calculation_mode,
+        "basis": basis,
+        "xc": xc,
+        "solvent_name": solvent_name,
+        "solvent_model": solvent_model,
+        "dispersion_model": dispersion_model,
+        "optimizer_config": optimizer_config,
+        "optimizer_ase_dict": optimizer_ase_dict,
+        "optimizer_mode": optimizer_mode,
+        "solvent_map_path": solvent_map_path,
+        "single_point_config": single_point_config,
+        "frequency_enabled": frequency_enabled,
+        "single_point_enabled": single_point_enabled,
+        "thread_count": thread_count,
+        "memory_gb": memory_gb,
+        "verbose": verbose,
+        "run_dir": run_dir,
+        "log_path": log_path,
+        "scf_config": scf_config,
+        "optimized_xyz_path": optimized_xyz_path,
+        "run_metadata_path": run_metadata_path,
+        "frequency_output_path": frequency_output_path,
+        "event_log_path": event_log_path,
+        "run_id": run_id,
+    }
+
+
+def _enqueue_background_run(args, context):
+    queued_at = datetime.now().isoformat()
+    queue_priority = args.queue_priority
+    max_runtime_seconds = args.queue_max_runtime
+    queued_metadata = {
+        "status": "queued",
+        "run_directory": context["run_dir"],
+        "run_id": context["run_id"],
+        "xyz_file": args.xyz_file,
+        "config_file": args.config,
+        "run_metadata_file": context["run_metadata_path"],
+        "log_file": context["log_path"],
+        "event_log_file": context["event_log_path"],
+        "queued_at": queued_at,
+        "priority": queue_priority,
+        "max_runtime_seconds": max_runtime_seconds,
+    }
+    write_run_metadata(context["run_metadata_path"], queued_metadata)
+    queue_entry = {
+        "status": "queued",
+        "run_directory": context["run_dir"],
+        "run_id": context["run_id"],
+        "xyz_file": args.xyz_file,
+        "config_file": args.config,
+        "solvent_map": args.solvent_map,
+        "run_metadata_file": context["run_metadata_path"],
+        "log_file": context["log_path"],
+        "event_log_file": context["event_log_path"],
+        "queued_at": queued_at,
+        "priority": queue_priority,
+        "max_runtime_seconds": max_runtime_seconds,
+        "retry_count": 0,
+    }
+    position = enqueue_run(queue_entry, DEFAULT_QUEUE_PATH, DEFAULT_QUEUE_LOCK_PATH)
+    record_status_event(
+        context["event_log_path"],
+        context["run_id"],
+        context["run_dir"],
+        "queued",
+        previous_status=None,
+        details={
             "priority": queue_priority,
             "max_runtime_seconds": max_runtime_seconds,
+        },
+    )
+    runner_command = [
+        sys.executable,
+        os.path.abspath(sys.argv[0]),
+        "--queue-runner",
+    ]
+    ensure_queue_runner_started(runner_command, DEFAULT_QUEUE_RUNNER_LOG_PATH)
+    print("Background run queued.")
+    print(f"  Run ID       : {context['run_id']}")
+    print(f"  Queue pos    : {position}")
+    print(f"  Run dir      : {context['run_dir']}")
+    print(f"  Metadata     : {context['run_metadata_path']}")
+    print(f"  Log file     : {context['log_path']}")
+    print(f"  Queue runner : {DEFAULT_QUEUE_RUNNER_LOG_PATH}")
+
+
+def build_molecule_context(args, context, memory_mb):
+    from pyscf import dft, gto
+
+    atom_spec, charge, spin, multiplicity = load_xyz(args.xyz_file)
+    if context["optimizer_mode"] == "transition_state" and multiplicity is None:
+        if args.interactive:
+            logging.info("TS 모드: multiplicity 입력 강제")
+            while True:
+                raw_value = input("Multiplicity(2S+1)를 입력하세요: ").strip()
+                try:
+                    multiplicity = int(raw_value)
+                except ValueError:
+                    print("Multiplicity는 양의 정수여야 합니다.")
+                    continue
+                if multiplicity < 1:
+                    print("Multiplicity는 양의 정수여야 합니다.")
+                    continue
+                break
+        else:
+            raise ValueError(
+                "Transition-state mode requires multiplicity; "
+                "provide it in the XYZ comment line or run with --interactive."
+            )
+    total_electrons = total_electron_count(atom_spec, charge)
+    if multiplicity is not None:
+        if multiplicity < 1:
+            raise ValueError("Multiplicity must be a positive integer (2S+1).")
+        multiplicity_spin = multiplicity - 1
+        if spin is not None and spin != multiplicity_spin:
+            raise ValueError(
+                "Spin and multiplicity are inconsistent. "
+                f"spin={spin} implies multiplicity={spin + 1}, "
+                f"but multiplicity={multiplicity} was provided."
+            )
+        spin = multiplicity_spin
+    if spin is None:
+        spin = total_electrons % 2
+        logging.warning(
+            "Auto spin estimation enabled: spin not specified; using parity "
+            "(spin = total_electrons %% 2). For TS/radical/metal/diradical cases, "
+            "set multiplicity in the XYZ comment line to avoid incorrect states."
+        )
+    elif spin < 0 or spin > total_electrons:
+        raise ValueError(
+            "Spin is outside the valid electron count range. "
+            f"Total electrons: {total_electrons}, spin: {spin}. "
+            "Spin must be between 0 and total electrons."
+        )
+    elif (total_electrons - spin) % 2 != 0:
+        raise ValueError(
+            "Spin is inconsistent with electron count. "
+            f"Total electrons: {total_electrons}, spin: {spin}. "
+            "Spin must satisfy (Nalpha - Nbeta) with Nalpha+Nbeta=total electrons."
+        )
+    if multiplicity is None:
+        multiplicity = spin + 1
+    mol = gto.M(atom=atom_spec, basis=context["basis"], charge=charge, spin=spin)
+    if memory_mb:
+        mol.max_memory = memory_mb
+
+    ks_type = select_ks_type(
+        mol=mol,
+        scf_config=context["scf_config"],
+        optimizer_mode=context["optimizer_mode"],
+        multiplicity=multiplicity,
+    )
+    if ks_type == "RKS":
+        mf = dft.RKS(mol)
+    else:
+        mf = dft.UKS(mol)
+    mf.xc = context["xc"]
+
+    return {
+        "atom_spec": atom_spec,
+        "charge": charge,
+        "spin": spin,
+        "multiplicity": multiplicity,
+        "mol": mol,
+        "mf": mf,
+        "ks_type": ks_type,
+        "total_electrons": total_electrons,
+    }
+
+
+def finalize_metadata(
+    run_metadata_path,
+    event_log_path,
+    run_id,
+    run_dir,
+    metadata,
+    status,
+    previous_status,
+    queue_update_fn=None,
+    exit_code=None,
+    details=None,
+    error=None,
+):
+    metadata["status"] = status
+    metadata["run_ended_at"] = datetime.now().isoformat()
+    metadata["run_updated_at"] = datetime.now().isoformat()
+    if error is not None:
+        metadata["error"] = str(error)
+        metadata["traceback"] = traceback.format_exc()
+    write_run_metadata(run_metadata_path, metadata)
+    record_status_event(
+        event_log_path,
+        run_id,
+        run_dir,
+        status,
+        previous_status=previous_status,
+        details=details,
+    )
+    if queue_update_fn:
+        queue_update_fn(status, exit_code=exit_code)
+
+
+def run_single_point_stage(stage_context, queue_update_fn):
+    logging.info("Starting single-point energy calculation...")
+    run_start = stage_context["run_start"]
+    calculation_metadata = stage_context["metadata"]
+    try:
+        sp_result = compute_single_point_energy(
+            stage_context["mol"],
+            stage_context["calc_basis"],
+            stage_context["calc_xc"],
+            stage_context["calc_scf_config"],
+            stage_context["calc_solvent_model"],
+            stage_context["calc_solvent_name"],
+            stage_context["calc_eps"],
+            stage_context["calc_dispersion_model"],
+            stage_context["verbose"],
+            stage_context["memory_mb"],
+            optimizer_mode=stage_context["optimizer_mode"],
+            multiplicity=stage_context["multiplicity"],
+            log_override=False,
+        )
+        calculation_metadata["dispersion_info"] = sp_result.get("dispersion")
+        energy = sp_result.get("energy")
+        sp_converged = sp_result.get("converged")
+        sp_cycles = sp_result.get("cycles")
+        summary = {
+            "elapsed_seconds": time.perf_counter() - run_start,
+            "n_steps": sp_cycles,
+            "final_energy": energy,
+            "opt_final_energy": energy,
+            "final_sp_energy": energy,
+            "final_sp_converged": sp_converged,
+            "final_sp_cycles": sp_cycles,
+            "scf_converged": sp_converged,
+            "opt_converged": None,
+            "converged": bool(sp_converged) if sp_converged is not None else True,
         }
-        write_run_metadata(run_metadata_path, queued_metadata)
-        queue_entry = {
-            "status": "queued",
-            "run_directory": run_dir,
-            "run_id": run_id,
-            "xyz_file": args.xyz_file,
-            "config_file": args.config,
-            "solvent_map": args.solvent_map,
-            "run_metadata_file": run_metadata_path,
-            "log_file": log_path,
-            "event_log_file": event_log_path,
-            "queued_at": queued_at,
-            "priority": queue_priority,
-            "max_runtime_seconds": max_runtime_seconds,
-            "retry_count": 0,
+        calculation_metadata["summary"] = summary
+        calculation_metadata["summary"]["memory_limit_enforced"] = stage_context[
+            "memory_limit_enforced"
+        ]
+        finalize_metadata(
+            stage_context["run_metadata_path"],
+            stage_context["event_log_path"],
+            stage_context["run_id"],
+            stage_context["run_dir"],
+            calculation_metadata,
+            status="completed",
+            previous_status="running",
+            queue_update_fn=queue_update_fn,
+            exit_code=0,
+        )
+    except Exception as exc:
+        logging.exception("Calculation failed.")
+        finalize_metadata(
+            stage_context["run_metadata_path"],
+            stage_context["event_log_path"],
+            stage_context["run_id"],
+            stage_context["run_dir"],
+            calculation_metadata,
+            status="failed",
+            previous_status="running",
+            queue_update_fn=queue_update_fn,
+            exit_code=1,
+            details={"error": str(exc)},
+            error=exc,
+        )
+        raise
+
+
+def run_frequency_stage(stage_context, queue_update_fn):
+    logging.info("Starting frequency calculation...")
+    run_start = stage_context["run_start"]
+    calculation_metadata = stage_context["metadata"]
+    try:
+        frequency_result = compute_frequencies(
+            stage_context["mol"],
+            stage_context["calc_basis"],
+            stage_context["calc_xc"],
+            stage_context["calc_scf_config"],
+            stage_context["calc_solvent_model"],
+            stage_context["calc_solvent_name"],
+            stage_context["calc_eps"],
+            stage_context["calc_dispersion_model"],
+            stage_context["freq_dispersion_mode"],
+            stage_context["verbose"],
+            stage_context["memory_mb"],
+            optimizer_mode=stage_context["optimizer_mode"],
+            multiplicity=stage_context["multiplicity"],
+            log_override=False,
+        )
+        imaginary_check = frequency_result.get("imaginary_check") or {}
+        imaginary_status = imaginary_check.get("status")
+        imaginary_message = imaginary_check.get("message")
+        if imaginary_message:
+            if imaginary_status == "one_imaginary":
+                logging.info("Imaginary frequency check: %s", imaginary_message)
+            else:
+                logging.warning("Imaginary frequency check: %s", imaginary_message)
+        frequency_payload = {
+            "status": "completed",
+            "output_file": stage_context["frequency_output_path"],
+            "units": _frequency_units(),
+            "versions": _frequency_versions(),
+            "basis": stage_context["calc_basis"],
+            "xc": stage_context["calc_xc"],
+            "scf": stage_context["calc_scf_config"],
+            "solvent": stage_context["calc_solvent_name"],
+            "solvent_model": stage_context["calc_solvent_model"]
+            if stage_context["calc_solvent_name"]
+            else None,
+            "solvent_eps": stage_context["calc_eps"],
+            "dispersion": stage_context["calc_dispersion_model"],
+            "dispersion_mode": stage_context["freq_dispersion_mode"],
+            "results": frequency_result,
         }
-        position = enqueue_run(queue_entry, DEFAULT_QUEUE_PATH, DEFAULT_QUEUE_LOCK_PATH)
+        with open(
+            stage_context["frequency_output_path"], "w", encoding="utf-8"
+        ) as handle:
+            json.dump(frequency_payload, handle, indent=2)
+        calculation_metadata["frequency"] = frequency_payload
+        calculation_metadata["dispersion_info"] = frequency_result.get("dispersion")
+        energy = frequency_result.get("energy")
+        sp_converged = frequency_result.get("converged")
+        sp_cycles = frequency_result.get("cycles")
+        summary = {
+            "elapsed_seconds": time.perf_counter() - run_start,
+            "n_steps": sp_cycles,
+            "final_energy": energy,
+            "opt_final_energy": energy,
+            "final_sp_energy": energy,
+            "final_sp_converged": sp_converged,
+            "final_sp_cycles": sp_cycles,
+            "scf_converged": sp_converged,
+            "opt_converged": None,
+            "converged": bool(sp_converged) if sp_converged is not None else True,
+        }
+        calculation_metadata["summary"] = summary
+        calculation_metadata["summary"]["memory_limit_enforced"] = stage_context[
+            "memory_limit_enforced"
+        ]
+        finalize_metadata(
+            stage_context["run_metadata_path"],
+            stage_context["event_log_path"],
+            stage_context["run_id"],
+            stage_context["run_dir"],
+            calculation_metadata,
+            status="completed",
+            previous_status="running",
+            queue_update_fn=queue_update_fn,
+            exit_code=0,
+        )
+    except Exception as exc:
+        logging.exception("Calculation failed.")
+        finalize_metadata(
+            stage_context["run_metadata_path"],
+            stage_context["event_log_path"],
+            stage_context["run_id"],
+            stage_context["run_dir"],
+            calculation_metadata,
+            status="failed",
+            previous_status="running",
+            queue_update_fn=queue_update_fn,
+            exit_code=1,
+            details={"error": str(exc)},
+            error=exc,
+        )
+        raise
+
+
+def run_optimization_stage(
+    args,
+    context,
+    molecule_context,
+    memory_mb,
+    memory_limit_status,
+    memory_limit_enforced,
+    openmp_available,
+    effective_threads,
+    queue_update_fn,
+):
+    from pyscf import gto
+
+    basis = context["basis"]
+    xc = context["xc"]
+    scf_config = context["scf_config"]
+    solvent_name = context["solvent_name"]
+    solvent_model = context["solvent_model"]
+    solvent_map_path = context["solvent_map_path"]
+    dispersion_model = context["dispersion_model"]
+    optimizer_config = context["optimizer_config"]
+    optimizer_ase_dict = context["optimizer_ase_dict"]
+    optimizer_mode = context["optimizer_mode"]
+    frequency_enabled = context["frequency_enabled"]
+    single_point_enabled = context["single_point_enabled"]
+    thread_count = context["thread_count"]
+    memory_gb = context["memory_gb"]
+    verbose = context["verbose"]
+    run_dir = context["run_dir"]
+    log_path = context["log_path"]
+    optimized_xyz_path = context["optimized_xyz_path"]
+    run_metadata_path = context["run_metadata_path"]
+    frequency_output_path = context["frequency_output_path"]
+    event_log_path = context["event_log_path"]
+    run_id = context["run_id"]
+    mol = molecule_context["mol"]
+    mf = molecule_context["mf"]
+    charge = molecule_context["charge"]
+    spin = molecule_context["spin"]
+    multiplicity = molecule_context["multiplicity"]
+    ks_type = molecule_context["ks_type"]
+
+    logging.info("Running capability check for geometry optimization (SCF + gradient)...")
+    run_capability_check(
+        mol,
+        basis,
+        xc,
+        scf_config,
+        solvent_model,
+        solvent_name,
+        context["eps"],
+        None,
+        "none",
+        require_hessian=False,
+        verbose=verbose,
+        memory_mb=memory_mb,
+        optimizer_mode=optimizer_mode,
+        multiplicity=multiplicity,
+    )
+    if frequency_enabled:
+        logging.info(
+            "Running capability check for frequency calculation (SCF + gradient + Hessian)..."
+        )
+        run_capability_check(
+            mol,
+            context["sp_basis"],
+            context["sp_xc"],
+            context["sp_scf_config"],
+            context["sp_solvent_model"] if context["sp_solvent_name"] else None,
+            context["sp_solvent_name"],
+            context["sp_eps"],
+            context["freq_dispersion_model"],
+            context["freq_dispersion_mode"],
+            require_hessian=True,
+            verbose=verbose,
+            memory_mb=memory_mb,
+            optimizer_mode=optimizer_mode,
+            multiplicity=multiplicity,
+        )
+
+    logging.info("Starting geometry optimization...")
+    logging.info("Run ID: %s", run_id)
+    logging.info("Run directory: %s", run_dir)
+    logging.info("Optimization mode: %s", optimizer_mode)
+    if thread_count:
+        logging.info("Using threads: %s", thread_count)
+        if openmp_available is False:
+            effective_display = (
+                str(effective_threads) if effective_threads is not None else "unknown"
+            )
+            logging.warning(
+                "OpenMP appears unavailable; requested threads may have no effect "
+                "(effective threads: %s).",
+                effective_display,
+            )
+    if memory_gb:
+        logging.info("Memory target: %s GB (PySCF max_memory)", memory_gb)
+        if memory_limit_status:
+            if memory_limit_status["applied"]:
+                limit_gb = memory_limit_status["limit_bytes"] / (1024 ** 3)
+                limit_name = memory_limit_status["limit_name"] or "unknown"
+                logging.info(
+                    "OS hard memory limit: applied at %.2f GB (%s)",
+                    limit_gb,
+                    limit_name,
+                )
+            else:
+                log_fn = logging.warning
+                if memory_limit_status["reason"] == "disabled by config":
+                    log_fn = logging.info
+                log_fn(
+                    "OS hard memory limit: not applied (%s).",
+                    memory_limit_status["reason"],
+                )
+    logging.info("Verbose logging: %s", "enabled" if verbose else "disabled")
+    logging.info("Log file: %s", log_path)
+    if event_log_path:
+        logging.info("Event log file: %s", event_log_path)
+    if context["applied_scf"]:
+        logging.info("SCF settings: %s", context["applied_scf"])
+    if dispersion_model:
+        logging.info("Dispersion correction: %s", dispersion_model)
+        if context["dispersion_info"]:
+            logging.info("Dispersion details: %s", context["dispersion_info"])
+    if context["sp_xc"] != xc:
+        logging.info("Single-point XC override: %s", context["sp_xc"])
+    if context["sp_basis"] != basis:
+        logging.info("Single-point basis override: %s", context["sp_basis"])
+    if context["sp_scf_config"] != scf_config:
+        logging.info("Single-point SCF override: %s", context["sp_scf_config"])
+    if context["sp_solvent_name"] != solvent_name or context["sp_solvent_model"] != solvent_model:
+        logging.info(
+            "Single-point solvent override: %s (%s)",
+            context["sp_solvent_name"],
+            context["sp_solvent_model"],
+        )
+    if (
+        context["sp_dispersion_model"] is not None
+        and context["sp_dispersion_model"] != dispersion_model
+    ):
+        logging.info("Single-point dispersion override: %s", context["sp_dispersion_model"])
+    if frequency_enabled:
+        logging.info("Frequency dispersion mode: %s", context["freq_dispersion_mode"])
+    run_start = time.perf_counter()
+    optimization_metadata = {
+        "status": "running",
+        "run_directory": run_dir,
+        "run_started_at": datetime.now().isoformat(),
+        "run_id": run_id,
+        "pid": os.getpid(),
+        "xyz_file": args.xyz_file,
+        "xyz_file_hash": compute_file_hash(args.xyz_file),
+        "basis": basis,
+        "xc": xc,
+        "solvent": solvent_name,
+        "solvent_model": solvent_model if solvent_name else None,
+        "solvent_eps": context["eps"],
+        "solvent_map": solvent_map_path,
+        "dispersion": dispersion_model,
+        "dispersion_info": context["dispersion_info"],
+        "frequency_dispersion_mode": context["freq_dispersion_mode"] if frequency_enabled else None,
+        "optimizer": {
+            "mode": optimizer_mode,
+            "output_xyz": optimizer_config.output_xyz if optimizer_config else None,
+            "ase": optimizer_ase_dict or None,
+        },
+        "single_point": {
+            "basis": context["sp_basis"],
+            "xc": context["sp_xc"],
+            "scf": context["sp_scf_config"],
+            "solvent": context["sp_solvent_name"],
+            "solvent_model": context["sp_solvent_model"]
+            if context["sp_solvent_name"]
+            else None,
+            "solvent_eps": context["sp_eps"],
+            "solvent_map": context["sp_solvent_map_path"],
+            "dispersion": context["sp_dispersion_model"],
+            "frequency_dispersion_mode": context["freq_dispersion_mode"]
+            if frequency_enabled
+            else None,
+        },
+        "single_point_enabled": single_point_enabled,
+        "frequency_enabled": frequency_enabled,
+        "calculation_mode": "optimization",
+        "charge": charge,
+        "spin": spin,
+        "multiplicity": multiplicity,
+        "ks_type": ks_type,
+        "thread_count": thread_count,
+        "effective_thread_count": effective_threads,
+        "openmp_available": openmp_available,
+        "memory_gb": memory_gb,
+        "memory_mb": memory_mb,
+        "memory_limit_status": memory_limit_status,
+        "log_file": log_path,
+        "event_log_file": event_log_path,
+        "optimized_xyz_file": optimized_xyz_path,
+        "frequency_file": frequency_output_path,
+        "run_metadata_file": run_metadata_path,
+        "config_file": args.config,
+        "config": context["config_dict"],
+        "config_raw": context["config_raw"],
+        "config_hash": compute_text_hash(context["config_raw"]),
+        "scf_config": scf_config,
+        "scf_settings": context["applied_scf"],
+        "environment": collect_environment_snapshot(thread_count),
+        "git": collect_git_metadata(os.getcwd()),
+        "versions": {
+            "ase": get_package_version("ase"),
+            "pyscf": get_package_version("pyscf"),
+            "dftd3": get_package_version("dftd3"),
+            "dftd4": get_package_version("dftd4"),
+        },
+    }
+    optimization_metadata["run_updated_at"] = datetime.now().isoformat()
+    n_steps = {"value": 0}
+    n_steps_source = None
+
+    write_run_metadata(run_metadata_path, optimization_metadata)
+    record_status_event(
+        event_log_path,
+        run_id,
+        run_dir,
+        "running",
+        previous_status=None,
+    )
+
+    last_metadata_write = {
+        "time": time.monotonic(),
+        "step": 0,
+    }
+
+    def _step_callback(*_args, **_kwargs):
+        n_steps["value"] += 1
+        step_value = n_steps["value"]
+        now = time.monotonic()
+        should_write = (step_value - last_metadata_write["step"] >= 5) or (
+            now - last_metadata_write["time"] >= 5.0
+        )
+        if should_write:
+            optimization_metadata["n_steps"] = step_value
+            optimization_metadata["n_steps_source"] = "ase"
+            optimization_metadata["status"] = "running"
+            optimization_metadata["run_updated_at"] = datetime.now().isoformat()
+            write_run_metadata(run_metadata_path, optimization_metadata)
+            last_metadata_write["time"] = now
+            last_metadata_write["step"] = step_value
+
+    try:
+        input_xyz_name = os.path.basename(args.xyz_file)
+        input_xyz_path = resolve_run_path(run_dir, input_xyz_name)
+        if os.path.abspath(args.xyz_file) != os.path.abspath(input_xyz_path):
+            shutil.copy2(args.xyz_file, input_xyz_path)
+        output_xyz_setting = (
+            optimizer_config.output_xyz if optimizer_config else None
+        ) or "ase_optimized.xyz"
+        output_xyz_path = resolve_run_path(run_dir, output_xyz_setting)
+        ensure_parent_dir(output_xyz_path)
+        n_steps_value = _run_ase_optimizer(
+            input_xyz_path,
+            output_xyz_path,
+            run_dir,
+            charge,
+            spin,
+            multiplicity,
+            basis,
+            xc,
+            scf_config,
+            solvent_model.lower() if solvent_model else None,
+            solvent_name,
+            context["eps"],
+            dispersion_model,
+            verbose,
+            memory_mb,
+            optimizer_ase_dict,
+            optimizer_mode,
+            step_callback=_step_callback,
+        )
+        optimized_atom_spec, _, _, _ = load_xyz(output_xyz_path)
+        mol_optimized = gto.M(
+            atom=optimized_atom_spec,
+            basis=basis,
+            charge=charge,
+            spin=spin,
+        )
+        if memory_mb:
+            mol_optimized.max_memory = memory_mb
+        if n_steps_value is not None:
+            n_steps["value"] = n_steps_value
+        n_steps_source = "ase"
+    except Exception as exc:
+        logging.exception("Geometry optimization failed.")
+        n_steps_value = n_steps["value"] if n_steps_source else None
+        optimization_metadata["status"] = "failed"
+        optimization_metadata["run_ended_at"] = datetime.now().isoformat()
+        optimization_metadata["error"] = str(exc)
+        optimization_metadata["traceback"] = traceback.format_exc()
+        optimization_metadata["last_geometry_source"] = "mf.mol"
+        optimization_metadata["n_steps"] = n_steps_value
+        optimization_metadata["n_steps_source"] = n_steps_source
+        elapsed_seconds = time.perf_counter() - run_start
+        optimization_metadata["summary"] = build_run_summary(
+            mf,
+            getattr(mf, "mol", mol),
+            elapsed_seconds,
+            completed=False,
+            n_steps=n_steps_value,
+            final_sp_energy=None,
+            final_sp_converged=None,
+            final_sp_cycles=None,
+        )
+        optimization_metadata["summary"]["memory_limit_enforced"] = memory_limit_enforced
+        write_run_metadata(run_metadata_path, optimization_metadata)
         record_status_event(
             event_log_path,
             run_id,
             run_dir,
-            "queued",
-            previous_status=None,
-            details={
-                "priority": queue_priority,
-                "max_runtime_seconds": max_runtime_seconds,
-            },
+            "failed",
+            previous_status="running",
+            details={"error": str(exc)},
         )
-        runner_command = [
-            sys.executable,
-            os.path.abspath(sys.argv[0]),
-            "--queue-runner",
-        ]
-        ensure_queue_runner_started(runner_command, DEFAULT_QUEUE_RUNNER_LOG_PATH)
-        print("Background run queued.")
-        print(f"  Run ID       : {run_id}")
-        print(f"  Queue pos    : {position}")
-        print(f"  Run dir      : {run_dir}")
-        print(f"  Metadata     : {run_metadata_path}")
-        print(f"  Log file     : {log_path}")
-        print(f"  Queue runner : {DEFAULT_QUEUE_RUNNER_LOG_PATH}")
+        queue_update_fn("failed", exit_code=1)
+        raise
+
+    logging.info("Optimization finished.")
+    logging.info("Optimized geometry (in Angstrom):")
+    logging.info("%s", mol_optimized.tostring(format="xyz"))
+    write_optimized_xyz(optimized_xyz_path, mol_optimized)
+    ensure_stream_newlines()
+    final_sp_energy = None
+    final_sp_converged = None
+    final_sp_cycles = None
+    optimization_metadata["status"] = "completed"
+    optimization_metadata["run_ended_at"] = datetime.now().isoformat()
+    elapsed_seconds = time.perf_counter() - run_start
+    n_steps_value = n_steps["value"] if n_steps_source else None
+    imaginary_count = None
+    frequency_payload = None
+    if frequency_enabled:
+        logging.info("Calculating harmonic frequencies for optimized geometry...")
+        try:
+            frequency_result = compute_frequencies(
+                mol_optimized,
+                context["sp_basis"],
+                context["sp_xc"],
+                context["sp_scf_config"],
+                context["sp_solvent_model"] if context["sp_solvent_name"] else None,
+                context["sp_solvent_name"],
+                context["sp_eps"],
+                context["freq_dispersion_model"],
+                context["freq_dispersion_mode"],
+                verbose,
+                memory_mb,
+                optimizer_mode=optimizer_mode,
+                multiplicity=multiplicity,
+            )
+            imaginary_count = frequency_result.get("imaginary_count")
+            imaginary_check = frequency_result.get("imaginary_check") or {}
+            imaginary_status = imaginary_check.get("status")
+            imaginary_message = imaginary_check.get("message")
+            if imaginary_message:
+                if imaginary_status == "one_imaginary":
+                    logging.info("Imaginary frequency check: %s", imaginary_message)
+                else:
+                    logging.warning("Imaginary frequency check: %s", imaginary_message)
+            frequency_payload = {
+                "status": "completed",
+                "output_file": frequency_output_path,
+                "units": _frequency_units(),
+                "versions": _frequency_versions(),
+                "basis": context["sp_basis"],
+                "xc": context["sp_xc"],
+                "scf": context["sp_scf_config"],
+                "solvent": context["sp_solvent_name"],
+                "solvent_model": context["sp_solvent_model"]
+                if context["sp_solvent_name"]
+                else None,
+                "solvent_eps": context["sp_eps"],
+                "dispersion": context["freq_dispersion_model"],
+                "dispersion_mode": context["freq_dispersion_mode"],
+                "results": frequency_result,
+            }
+            with open(frequency_output_path, "w", encoding="utf-8") as handle:
+                json.dump(frequency_payload, handle, indent=2)
+            optimization_metadata["frequency"] = frequency_payload
+        except Exception as exc:
+            logging.exception("Frequency calculation failed.")
+            failure_reason = str(exc) or "Frequency calculation failed."
+            frequency_payload = {
+                "status": "failed",
+                "output_file": frequency_output_path,
+                "reason": failure_reason,
+                "units": _frequency_units(),
+                "versions": _frequency_versions(),
+                "basis": context["sp_basis"],
+                "xc": context["sp_xc"],
+                "scf": context["sp_scf_config"],
+                "solvent": context["sp_solvent_name"],
+                "solvent_model": context["sp_solvent_model"]
+                if context["sp_solvent_name"]
+                else None,
+                "solvent_eps": context["sp_eps"],
+                "dispersion": context["freq_dispersion_model"],
+                "dispersion_mode": context["freq_dispersion_mode"],
+                "results": None,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+            with open(frequency_output_path, "w", encoding="utf-8") as handle:
+                json.dump(frequency_payload, handle, indent=2)
+            optimization_metadata["frequency"] = frequency_payload
+    else:
+        frequency_payload = {
+            "status": "skipped",
+            "output_file": frequency_output_path,
+            "reason": "Frequency calculation disabled.",
+            "units": _frequency_units(),
+            "versions": _frequency_versions(),
+            "results": None,
+        }
+        with open(frequency_output_path, "w", encoding="utf-8") as handle:
+            json.dump(frequency_payload, handle, indent=2)
+        optimization_metadata["frequency"] = frequency_payload
+    run_single_point = False
+    sp_status = "skipped"
+    sp_skip_reason = None
+    if single_point_enabled:
+        if frequency_enabled:
+            expected_imaginary = 1 if optimizer_mode == "transition_state" else 0
+            if imaginary_count is None:
+                logging.warning(
+                    "Skipping single-point calculation because imaginary frequency "
+                    "count is unavailable."
+                )
+                sp_skip_reason = "Imaginary frequency count unavailable."
+            elif imaginary_count == expected_imaginary:
+                run_single_point = True
+            else:
+                logging.warning(
+                    "Skipping single-point calculation because imaginary frequency "
+                    "count %s does not match expected %s.",
+                    imaginary_count,
+                    expected_imaginary,
+                )
+                sp_skip_reason = (
+                    "Imaginary frequency count does not match expected "
+                    f"{expected_imaginary}."
+                )
+        else:
+            run_single_point = True
+    else:
+        logging.info("Skipping single-point energy calculation (disabled).")
+        sp_skip_reason = "Single-point calculation disabled."
+
+    if run_single_point:
+        sp_status = "executed"
+        sp_skip_reason = None
+
+    optimization_metadata["single_point"]["status"] = sp_status
+    optimization_metadata["single_point"]["skip_reason"] = sp_skip_reason
+    if frequency_payload is not None:
+        frequency_payload["single_point"] = {
+            "status": sp_status,
+            "skip_reason": sp_skip_reason,
+        }
+        with open(frequency_output_path, "w", encoding="utf-8") as handle:
+            json.dump(frequency_payload, handle, indent=2)
+
+    try:
+        if run_single_point:
+            logging.info("Calculating single-point energy for optimized geometry...")
+            sp_result = compute_single_point_energy(
+                mol_optimized,
+                context["sp_basis"],
+                context["sp_xc"],
+                context["sp_scf_config"],
+                context["sp_solvent_model"] if context["sp_solvent_name"] else None,
+                context["sp_solvent_name"],
+                context["sp_eps"],
+                context["freq_dispersion_model"],
+                verbose,
+                memory_mb,
+                optimizer_mode=optimizer_mode,
+                multiplicity=multiplicity,
+            )
+            final_sp_energy = sp_result["energy"]
+            final_sp_converged = sp_result["converged"]
+            final_sp_cycles = sp_result["cycles"]
+            optimization_metadata["single_point"]["dispersion_info"] = sp_result.get(
+                "dispersion"
+            )
+            if final_sp_cycles is None:
+                final_sp_cycles = parse_single_point_cycle_count(log_path)
+        elif single_point_enabled:
+            logging.info("Skipping single-point energy calculation.")
+    except Exception:
+        logging.exception("Single-point energy calculation failed.")
+        if run_single_point:
+            final_sp_energy = None
+            final_sp_converged = None
+            final_sp_cycles = parse_single_point_cycle_count(log_path)
+    optimization_metadata["n_steps"] = n_steps_value
+    optimization_metadata["n_steps_source"] = n_steps_source
+    optimization_metadata["summary"] = build_run_summary(
+        mf,
+        mol_optimized,
+        elapsed_seconds,
+        completed=True,
+        n_steps=n_steps_value,
+        final_sp_energy=final_sp_energy,
+        final_sp_converged=final_sp_converged,
+        final_sp_cycles=final_sp_cycles,
+    )
+    optimization_metadata["summary"]["memory_limit_enforced"] = memory_limit_enforced
+    write_run_metadata(run_metadata_path, optimization_metadata)
+    record_status_event(
+        event_log_path,
+        run_id,
+        run_dir,
+        "completed",
+        previous_status="running",
+    )
+    queue_update_fn("completed", exit_code=0)
+
+def run(args, config: RunConfig, config_raw, config_source_path, run_in_background):
+    context = prepare_run_context(args, config, config_raw)
+    calculation_mode = context["calculation_mode"]
+    config_dict = context["config_dict"]
+    basis = context["basis"]
+    xc = context["xc"]
+    solvent_name = context["solvent_name"]
+    solvent_model = context["solvent_model"]
+    dispersion_model = context["dispersion_model"]
+    optimizer_mode = context["optimizer_mode"]
+    solvent_map_path = context["solvent_map_path"]
+    single_point_config = context["single_point_config"]
+    config_raw = context["config_raw"]
+    thread_count = context["thread_count"]
+    memory_gb = context["memory_gb"]
+    verbose = context["verbose"]
+    run_dir = context["run_dir"]
+    log_path = context["log_path"]
+    scf_config = context["scf_config"]
+    run_metadata_path = context["run_metadata_path"]
+    frequency_output_path = context["frequency_output_path"]
+    event_log_path = context["event_log_path"]
+    run_id = context["run_id"]
+    if run_in_background:
+        _enqueue_background_run(args, context)
         return
-    setup_logging(log_path, verbose, run_id=run_id, event_log_path=event_log_path)
+    setup_logging(
+        log_path,
+        verbose,
+        run_id=run_id,
+        event_log_path=event_log_path,
+    )
     if config_source_path is not None:
         logging.info("Loaded config file: %s", config_source_path)
     queue_tracking = False
@@ -412,14 +1291,14 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
         started_at = datetime.now().isoformat()
         foreground_entry = {
             "status": "running",
-            "run_directory": run_dir,
-            "run_id": run_id,
+            "run_directory": context["run_dir"],
+            "run_id": context["run_id"],
             "xyz_file": args.xyz_file,
             "config_file": args.config,
             "solvent_map": args.solvent_map,
-            "run_metadata_file": run_metadata_path,
-            "log_file": log_path,
-            "event_log_file": event_log_path,
+            "run_metadata_file": context["run_metadata_path"],
+            "log_file": context["log_path"],
+            "event_log_file": context["event_log_path"],
             "started_at": started_at,
             "priority": args.queue_priority,
             "max_runtime_seconds": args.queue_max_runtime,
@@ -437,89 +1316,27 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
             update_queue_status(
                 DEFAULT_QUEUE_PATH,
                 DEFAULT_QUEUE_LOCK_PATH,
-                run_id,
+                context["run_id"],
                 status,
                 exit_code=exit_code,
             )
 
     try:
-        thread_status = apply_thread_settings(thread_count)
+        thread_status = apply_thread_settings(context["thread_count"])
         openmp_available = thread_status.get("openmp_available")
         effective_threads = thread_status.get("effective_threads")
         enforce_os_memory_limit = bool(config.enforce_os_memory_limit)
-        memory_mb, memory_limit_status = apply_memory_limit(memory_gb, enforce_os_memory_limit)
+        memory_mb, memory_limit_status = apply_memory_limit(
+            context["memory_gb"], enforce_os_memory_limit
+        )
         memory_limit_enforced = bool(memory_limit_status and memory_limit_status.get("applied"))
 
-        from pyscf import dft, gto
-
-        atom_spec, charge, spin, multiplicity = load_xyz(args.xyz_file)
-        if optimizer_mode == "transition_state" and multiplicity is None:
-            if args.interactive:
-                logging.info("TS 모드: multiplicity 입력 강제")
-                while True:
-                    raw_value = input("Multiplicity(2S+1)를 입력하세요: ").strip()
-                    try:
-                        multiplicity = int(raw_value)
-                    except ValueError:
-                        print("Multiplicity는 양의 정수여야 합니다.")
-                        continue
-                    if multiplicity < 1:
-                        print("Multiplicity는 양의 정수여야 합니다.")
-                        continue
-                    break
-            else:
-                raise ValueError(
-                    "Transition-state mode requires multiplicity; "
-                    "provide it in the XYZ comment line or run with --interactive."
-                )
-        total_electrons = total_electron_count(atom_spec, charge)
-        if multiplicity is not None:
-            if multiplicity < 1:
-                raise ValueError("Multiplicity must be a positive integer (2S+1).")
-            multiplicity_spin = multiplicity - 1
-            if spin is not None and spin != multiplicity_spin:
-                raise ValueError(
-                    "Spin and multiplicity are inconsistent. "
-                    f"spin={spin} implies multiplicity={spin + 1}, "
-                    f"but multiplicity={multiplicity} was provided."
-                )
-            spin = multiplicity_spin
-        if spin is None:
-            spin = total_electrons % 2
-            logging.warning(
-                "Auto spin estimation enabled: spin not specified; using parity "
-                "(spin = total_electrons %% 2). For TS/radical/metal/diradical cases, "
-                "set multiplicity in the XYZ comment line to avoid incorrect states."
-            )
-        elif spin < 0 or spin > total_electrons:
-            raise ValueError(
-                "Spin is outside the valid electron count range. "
-                f"Total electrons: {total_electrons}, spin: {spin}. "
-                "Spin must be between 0 and total electrons."
-            )
-        elif (total_electrons - spin) % 2 != 0:
-            raise ValueError(
-                "Spin is inconsistent with electron count. "
-                f"Total electrons: {total_electrons}, spin: {spin}. "
-                "Spin must satisfy (Nalpha - Nbeta) with Nalpha+Nbeta=total electrons."
-            )
-        if multiplicity is None:
-            multiplicity = spin + 1
-        mol = gto.M(atom=atom_spec, basis=basis, charge=charge, spin=spin)
-        if memory_mb:
-            mol.max_memory = memory_mb
-
-        ks_type = select_ks_type(
-            mol=mol,
-            scf_config=scf_config,
-            optimizer_mode=optimizer_mode,
-            multiplicity=multiplicity,
-        )
-        if ks_type == "RKS":
-            mf = dft.RKS(mol)
-        else:
-            mf = dft.UKS(mol)
-        mf.xc = xc
+        molecule_context = build_molecule_context(args, context, memory_mb)
+        mol = molecule_context["mol"]
+        mf = molecule_context["mf"]
+        charge = molecule_context["charge"]
+        spin = molecule_context["spin"]
+        multiplicity = molecule_context["multiplicity"]
 
         calculation_label = {
             "optimization": "Geometry optimization",
@@ -564,11 +1381,14 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                     eps,
                 )
         dispersion_info = None
+        context["eps"] = eps
+        context["dispersion_info"] = dispersion_info
         if verbose:
             mf.verbose = 4
         applied_scf = scf_config or None
         if calculation_mode == "optimization":
             applied_scf = apply_scf_settings(mf, scf_config)
+        context["applied_scf"] = applied_scf
 
         sp_basis = (
             single_point_config.basis if single_point_config and single_point_config.basis else basis
@@ -649,6 +1469,14 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
             sp_solvent_name,
             sp_solvent_model,
         )
+        context["sp_basis"] = sp_basis
+        context["sp_xc"] = sp_xc
+        context["sp_scf_config"] = sp_scf_config
+        context["sp_solvent_name"] = sp_solvent_name
+        context["sp_solvent_model"] = sp_solvent_model
+        context["sp_dispersion_model"] = sp_dispersion_model
+        context["sp_solvent_map_path"] = sp_solvent_map_path
+        context["sp_eps"] = sp_eps
 
         frequency_config = config.frequency
         freq_dispersion_mode = _normalize_frequency_dispersion_mode(
@@ -665,6 +1493,8 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
             freq_dispersion_raw,
             allow_dispersion=True,
         )
+        context["freq_dispersion_mode"] = freq_dispersion_mode
+        context["freq_dispersion_model"] = freq_dispersion_model
 
         if calculation_mode != "optimization":
             calc_basis = sp_basis
@@ -704,10 +1534,6 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 optimizer_mode=optimizer_mode,
                 multiplicity=multiplicity,
             )
-            if calculation_mode == "single_point":
-                logging.info("Starting single-point energy calculation...")
-            else:
-                logging.info("Starting frequency calculation...")
             logging.info("Run ID: %s", run_id)
             logging.info("Run directory: %s", run_dir)
             if thread_count:
@@ -836,617 +1662,47 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 "running",
                 previous_status=None,
             )
-
-            try:
-                if calculation_mode == "single_point":
-                    sp_result = compute_single_point_energy(
-                        mol,
-                        calc_basis,
-                        calc_xc,
-                        calc_scf_config,
-                        calc_solvent_model if calc_solvent_name else None,
-                        calc_solvent_name,
-                        calc_eps,
-                        calc_dispersion_model,
-                        verbose,
-                        memory_mb,
-                        optimizer_mode=optimizer_mode,
-                        multiplicity=multiplicity,
-                        log_override=False,
-                    )
-                    calculation_metadata["dispersion_info"] = sp_result.get("dispersion")
-                    energy = sp_result.get("energy")
-                    sp_converged = sp_result.get("converged")
-                    sp_cycles = sp_result.get("cycles")
-                    summary = {
-                        "elapsed_seconds": time.perf_counter() - run_start,
-                        "n_steps": sp_cycles,
-                        "final_energy": energy,
-                        "opt_final_energy": energy,
-                        "final_sp_energy": energy,
-                        "final_sp_converged": sp_converged,
-                        "final_sp_cycles": sp_cycles,
-                        "scf_converged": sp_converged,
-                        "opt_converged": None,
-                        "converged": bool(sp_converged)
-                        if sp_converged is not None
-                        else True,
-                    }
-                    calculation_metadata["summary"] = summary
-                    calculation_metadata["summary"]["memory_limit_enforced"] = (
-                        memory_limit_enforced
-                    )
-                else:
-                    frequency_result = compute_frequencies(
-                        mol,
-                        calc_basis,
-                        calc_xc,
-                        calc_scf_config,
-                        calc_solvent_model if calc_solvent_name else None,
-                        calc_solvent_name,
-                        calc_eps,
-                        calc_dispersion_model,
-                        freq_dispersion_mode,
-                        verbose,
-                        memory_mb,
-                        optimizer_mode=optimizer_mode,
-                        multiplicity=multiplicity,
-                        log_override=False,
-                    )
-                    imaginary_check = frequency_result.get("imaginary_check") or {}
-                    imaginary_status = imaginary_check.get("status")
-                    imaginary_message = imaginary_check.get("message")
-                    if imaginary_message:
-                        if imaginary_status == "one_imaginary":
-                            logging.info("Imaginary frequency check: %s", imaginary_message)
-                        else:
-                            logging.warning("Imaginary frequency check: %s", imaginary_message)
-                    frequency_payload = {
-                        "status": "completed",
-                        "output_file": frequency_output_path,
-                        "units": _frequency_units(),
-                        "versions": _frequency_versions(),
-                        "basis": calc_basis,
-                        "xc": calc_xc,
-                        "scf": calc_scf_config,
-                        "solvent": calc_solvent_name,
-                        "solvent_model": calc_solvent_model if calc_solvent_name else None,
-                        "solvent_eps": calc_eps,
-                        "dispersion": calc_dispersion_model,
-                        "dispersion_mode": freq_dispersion_mode,
-                        "results": frequency_result,
-                    }
-                    with open(frequency_output_path, "w", encoding="utf-8") as handle:
-                        json.dump(frequency_payload, handle, indent=2)
-                    calculation_metadata["frequency"] = frequency_payload
-                    calculation_metadata["dispersion_info"] = frequency_result.get("dispersion")
-                    energy = frequency_result.get("energy")
-                    sp_converged = frequency_result.get("converged")
-                    sp_cycles = frequency_result.get("cycles")
-                    summary = {
-                        "elapsed_seconds": time.perf_counter() - run_start,
-                        "n_steps": sp_cycles,
-                        "final_energy": energy,
-                        "opt_final_energy": energy,
-                        "final_sp_energy": energy,
-                        "final_sp_converged": sp_converged,
-                        "final_sp_cycles": sp_cycles,
-                        "scf_converged": sp_converged,
-                        "opt_converged": None,
-                        "converged": bool(sp_converged)
-                        if sp_converged is not None
-                        else True,
-                    }
-                    calculation_metadata["summary"] = summary
-                    calculation_metadata["summary"]["memory_limit_enforced"] = (
-                        memory_limit_enforced
-                    )
-
-                calculation_metadata["status"] = "completed"
-                calculation_metadata["run_ended_at"] = datetime.now().isoformat()
-                calculation_metadata["run_updated_at"] = datetime.now().isoformat()
-                write_run_metadata(run_metadata_path, calculation_metadata)
-                record_status_event(
-                    event_log_path,
-                    run_id,
-                    run_dir,
-                    "completed",
-                    previous_status="running",
-                )
-                _update_foreground_queue("completed", exit_code=0)
-            except Exception as exc:
-                logging.exception("Calculation failed.")
-                calculation_metadata["status"] = "failed"
-                calculation_metadata["run_ended_at"] = datetime.now().isoformat()
-                calculation_metadata["run_updated_at"] = datetime.now().isoformat()
-                calculation_metadata["error"] = str(exc)
-                calculation_metadata["traceback"] = traceback.format_exc()
-                write_run_metadata(run_metadata_path, calculation_metadata)
-                record_status_event(
-                    event_log_path,
-                    run_id,
-                    run_dir,
-                    "failed",
-                    previous_status="running",
-                    details={"error": str(exc)},
-                )
-                _update_foreground_queue("failed", exit_code=1)
-                raise
+            stage_context = {
+                "mol": mol,
+                "calc_basis": calc_basis,
+                "calc_xc": calc_xc,
+                "calc_scf_config": calc_scf_config,
+                "calc_solvent_name": calc_solvent_name,
+                "calc_solvent_model": calc_solvent_model if calc_solvent_name else None,
+                "calc_eps": calc_eps,
+                "calc_dispersion_model": calc_dispersion_model,
+                "freq_dispersion_mode": freq_dispersion_mode,
+                "verbose": verbose,
+                "memory_mb": memory_mb,
+                "optimizer_mode": optimizer_mode,
+                "multiplicity": multiplicity,
+                "run_start": run_start,
+                "metadata": calculation_metadata,
+                "memory_limit_enforced": memory_limit_enforced,
+                "run_metadata_path": run_metadata_path,
+                "event_log_path": event_log_path,
+                "run_id": run_id,
+                "run_dir": run_dir,
+                "frequency_output_path": frequency_output_path,
+            }
+            if calculation_mode == "single_point":
+                run_single_point_stage(stage_context, _update_foreground_queue)
+            else:
+                run_frequency_stage(stage_context, _update_foreground_queue)
             return
 
         if calculation_mode == "optimization":
-            logging.info("Running capability check for geometry optimization (SCF + gradient)...")
-            run_capability_check(
-                mol,
-                basis,
-                xc,
-                scf_config,
-                solvent_model,
-                solvent_name,
-                eps,
-                None,
-                "none",
-                require_hessian=False,
-                verbose=verbose,
-                memory_mb=memory_mb,
-                optimizer_mode=optimizer_mode,
-                multiplicity=multiplicity,
-            )
-            if frequency_enabled:
-                logging.info(
-                    "Running capability check for frequency calculation (SCF + gradient + Hessian)..."
-                )
-                run_capability_check(
-                    mol,
-                    sp_basis,
-                    sp_xc,
-                    sp_scf_config,
-                    sp_solvent_model if sp_solvent_name else None,
-                    sp_solvent_name,
-                    sp_eps,
-                    freq_dispersion_model,
-                    freq_dispersion_mode,
-                    require_hessian=True,
-                    verbose=verbose,
-                    memory_mb=memory_mb,
-                    optimizer_mode=optimizer_mode,
-                    multiplicity=multiplicity,
-                )
-
-            logging.info("Starting geometry optimization...")
-            logging.info("Run ID: %s", run_id)
-            logging.info("Run directory: %s", run_dir)
-            logging.info("Optimization mode: %s", optimizer_mode)
-            if thread_count:
-                logging.info("Using threads: %s", thread_count)
-                if openmp_available is False:
-                    effective_display = (
-                        str(effective_threads) if effective_threads is not None else "unknown"
-                    )
-                    logging.warning(
-                        "OpenMP appears unavailable; requested threads may have no effect "
-                        "(effective threads: %s).",
-                        effective_display,
-                    )
-            if memory_gb:
-                logging.info("Memory target: %s GB (PySCF max_memory)", memory_gb)
-                if memory_limit_status:
-                    if memory_limit_status["applied"]:
-                        limit_gb = memory_limit_status["limit_bytes"] / (1024 ** 3)
-                        limit_name = memory_limit_status["limit_name"] or "unknown"
-                        logging.info(
-                            "OS hard memory limit: applied at %.2f GB (%s)",
-                            limit_gb,
-                            limit_name,
-                        )
-                    else:
-                        log_fn = logging.warning
-                        if memory_limit_status["reason"] == "disabled by config":
-                            log_fn = logging.info
-                        log_fn(
-                            "OS hard memory limit: not applied (%s).",
-                            memory_limit_status["reason"],
-                        )
-            logging.info("Verbose logging: %s", "enabled" if verbose else "disabled")
-            logging.info("Log file: %s", log_path)
-            if event_log_path:
-                logging.info("Event log file: %s", event_log_path)
-            if applied_scf:
-                logging.info("SCF settings: %s", applied_scf)
-            if dispersion_model:
-                logging.info("Dispersion correction: %s", dispersion_model)
-                if dispersion_info:
-                    logging.info("Dispersion details: %s", dispersion_info)
-            if sp_xc != xc:
-                logging.info("Single-point XC override: %s", sp_xc)
-            if sp_basis != basis:
-                logging.info("Single-point basis override: %s", sp_basis)
-            if sp_scf_config != scf_config:
-                logging.info("Single-point SCF override: %s", sp_scf_config)
-            if sp_solvent_name != solvent_name or sp_solvent_model != solvent_model:
-                logging.info(
-                    "Single-point solvent override: %s (%s)",
-                    sp_solvent_name,
-                    sp_solvent_model,
-                )
-            if sp_dispersion_model is not None and sp_dispersion_model != dispersion_model:
-                logging.info("Single-point dispersion override: %s", sp_dispersion_model)
-            if frequency_enabled:
-                logging.info("Frequency dispersion mode: %s", freq_dispersion_mode)
-            run_start = time.perf_counter()
-            optimization_metadata = {
-                "status": "running",
-                "run_directory": run_dir,
-                "run_started_at": datetime.now().isoformat(),
-                "run_id": run_id,
-                "pid": os.getpid(),
-                "xyz_file": args.xyz_file,
-                "xyz_file_hash": compute_file_hash(args.xyz_file),
-                "basis": basis,
-                "xc": xc,
-                "solvent": solvent_name,
-                "solvent_model": solvent_model if solvent_name else None,
-                "solvent_eps": eps,
-                "solvent_map": solvent_map_path,
-                "dispersion": dispersion_model,
-                "dispersion_info": dispersion_info,
-                "frequency_dispersion_mode": freq_dispersion_mode if frequency_enabled else None,
-                "optimizer": {
-                    "mode": optimizer_mode,
-                    "output_xyz": optimizer_config.output_xyz if optimizer_config else None,
-                    "ase": optimizer_ase_dict or None,
-                },
-                "single_point": {
-                    "basis": sp_basis,
-                    "xc": sp_xc,
-                    "scf": sp_scf_config,
-                    "solvent": sp_solvent_name,
-                    "solvent_model": sp_solvent_model if sp_solvent_name else None,
-                    "solvent_eps": sp_eps,
-                    "solvent_map": sp_solvent_map_path,
-                    "dispersion": sp_dispersion_model,
-                    "frequency_dispersion_mode": freq_dispersion_mode
-                    if frequency_enabled
-                    else None,
-                },
-                "single_point_enabled": single_point_enabled,
-                "frequency_enabled": frequency_enabled,
-                "calculation_mode": calculation_mode,
-                "charge": charge,
-                "spin": spin,
-                "multiplicity": multiplicity,
-                "ks_type": ks_type,
-                "thread_count": thread_count,
-                "effective_thread_count": effective_threads,
-                "openmp_available": openmp_available,
-                "memory_gb": memory_gb,
-                "memory_mb": memory_mb,
-                "memory_limit_status": memory_limit_status,
-                "log_file": log_path,
-                "event_log_file": event_log_path,
-                "optimized_xyz_file": optimized_xyz_path,
-                "frequency_file": frequency_output_path,
-                "run_metadata_file": run_metadata_path,
-                "config_file": args.config,
-                "config": config_dict,
-                "config_raw": config_raw,
-                "config_hash": compute_text_hash(config_raw),
-                "scf_config": scf_config,
-                "scf_settings": applied_scf,
-                "environment": collect_environment_snapshot(thread_count),
-                "git": collect_git_metadata(os.getcwd()),
-                "versions": {
-                    "ase": get_package_version("ase"),
-                    "pyscf": get_package_version("pyscf"),
-                    "dftd3": get_package_version("dftd3"),
-                    "dftd4": get_package_version("dftd4"),
-                },
-            }
-            optimization_metadata["run_updated_at"] = datetime.now().isoformat()
-            n_steps = {"value": 0}
-            n_steps_source = None
-
-            write_run_metadata(run_metadata_path, optimization_metadata)
-            record_status_event(
-                event_log_path,
-                run_id,
-                run_dir,
-                "running",
-                previous_status=None,
-            )
-
-            last_metadata_write = {
-                "time": time.monotonic(),
-                "step": 0,
-            }
-
-        def _step_callback(*_args, **_kwargs):
-            n_steps["value"] += 1
-            step_value = n_steps["value"]
-            now = time.monotonic()
-            should_write = (step_value - last_metadata_write["step"] >= 5) or (
-                now - last_metadata_write["time"] >= 5.0
-            )
-            if should_write:
-                optimization_metadata["n_steps"] = step_value
-                optimization_metadata["n_steps_source"] = "ase"
-                optimization_metadata["status"] = "running"
-                optimization_metadata["run_updated_at"] = datetime.now().isoformat()
-                write_run_metadata(run_metadata_path, optimization_metadata)
-                last_metadata_write["time"] = now
-                last_metadata_write["step"] = step_value
-
-        try:
-            input_xyz_name = os.path.basename(args.xyz_file)
-            input_xyz_path = resolve_run_path(run_dir, input_xyz_name)
-            if os.path.abspath(args.xyz_file) != os.path.abspath(input_xyz_path):
-                shutil.copy2(args.xyz_file, input_xyz_path)
-            output_xyz_setting = (
-                optimizer_config.output_xyz if optimizer_config else None
-            ) or "ase_optimized.xyz"
-            output_xyz_path = resolve_run_path(run_dir, output_xyz_setting)
-            ensure_parent_dir(output_xyz_path)
-            n_steps_value = _run_ase_optimizer(
-                input_xyz_path,
-                output_xyz_path,
-                run_dir,
-                charge,
-                spin,
-                multiplicity,
-                basis,
-                xc,
-                scf_config,
-                solvent_model.lower() if solvent_model else None,
-                solvent_name,
-                eps,
-                dispersion_model,
-                verbose,
+            run_optimization_stage(
+                args,
+                context,
+                molecule_context,
                 memory_mb,
-                optimizer_ase_dict,
-                optimizer_mode,
-                step_callback=_step_callback,
+                memory_limit_status,
+                memory_limit_enforced,
+                openmp_available,
+                effective_threads,
+                _update_foreground_queue,
             )
-            optimized_atom_spec, _, _, _ = load_xyz(output_xyz_path)
-            mol_optimized = gto.M(
-                atom=optimized_atom_spec,
-                basis=basis,
-                charge=charge,
-                spin=spin,
-            )
-            if memory_mb:
-                mol_optimized.max_memory = memory_mb
-            if n_steps_value is not None:
-                n_steps["value"] = n_steps_value
-            n_steps_source = "ase"
-        except Exception as exc:
-            logging.exception("Geometry optimization failed.")
-            n_steps_value = n_steps["value"] if n_steps_source else None
-            optimization_metadata["status"] = "failed"
-            optimization_metadata["run_ended_at"] = datetime.now().isoformat()
-            optimization_metadata["error"] = str(exc)
-            optimization_metadata["traceback"] = traceback.format_exc()
-            optimization_metadata["last_geometry_source"] = "mf.mol"
-            optimization_metadata["n_steps"] = n_steps_value
-            optimization_metadata["n_steps_source"] = n_steps_source
-            elapsed_seconds = time.perf_counter() - run_start
-            optimization_metadata["summary"] = build_run_summary(
-                mf,
-                getattr(mf, "mol", mol),
-                elapsed_seconds,
-                completed=False,
-                n_steps=n_steps_value,
-                final_sp_energy=None,
-                final_sp_converged=None,
-                final_sp_cycles=None,
-            )
-            optimization_metadata["summary"]["memory_limit_enforced"] = memory_limit_enforced
-            write_run_metadata(run_metadata_path, optimization_metadata)
-            record_status_event(
-                event_log_path,
-                run_id,
-                run_dir,
-                "failed",
-                previous_status="running",
-                details={"error": str(exc)},
-            )
-            _update_foreground_queue("failed", exit_code=1)
-            raise
-
-        logging.info("Optimization finished.")
-        logging.info("Optimized geometry (in Angstrom):")
-        logging.info("%s", mol_optimized.tostring(format="xyz"))
-        write_optimized_xyz(optimized_xyz_path, mol_optimized)
-        ensure_stream_newlines()
-        final_sp_energy = None
-        final_sp_converged = None
-        final_sp_cycles = None
-        optimization_metadata["status"] = "completed"
-        optimization_metadata["run_ended_at"] = datetime.now().isoformat()
-        elapsed_seconds = time.perf_counter() - run_start
-        n_steps_value = n_steps["value"] if n_steps_source else None
-        imaginary_count = None
-        frequency_payload = None
-        if frequency_enabled:
-            logging.info("Calculating harmonic frequencies for optimized geometry...")
-            try:
-                frequency_result = compute_frequencies(
-                    mol_optimized,
-                    sp_basis,
-                    sp_xc,
-                    sp_scf_config,
-                    sp_solvent_model if sp_solvent_name else None,
-                    sp_solvent_name,
-                    sp_eps,
-                    freq_dispersion_model,
-                    freq_dispersion_mode,
-                    verbose,
-                    memory_mb,
-                    optimizer_mode=optimizer_mode,
-                    multiplicity=multiplicity,
-                )
-                imaginary_count = frequency_result.get("imaginary_count")
-                imaginary_check = frequency_result.get("imaginary_check") or {}
-                imaginary_status = imaginary_check.get("status")
-                imaginary_message = imaginary_check.get("message")
-                if imaginary_message:
-                    if imaginary_status == "one_imaginary":
-                        logging.info("Imaginary frequency check: %s", imaginary_message)
-                    else:
-                        logging.warning("Imaginary frequency check: %s", imaginary_message)
-                frequency_payload = {
-                    "status": "completed",
-                    "output_file": frequency_output_path,
-                    "units": _frequency_units(),
-                    "versions": _frequency_versions(),
-                    "basis": sp_basis,
-                    "xc": sp_xc,
-                    "scf": sp_scf_config,
-                    "solvent": sp_solvent_name,
-                    "solvent_model": sp_solvent_model if sp_solvent_name else None,
-                    "solvent_eps": sp_eps,
-                    "dispersion": freq_dispersion_model,
-                    "dispersion_mode": freq_dispersion_mode,
-                    "results": frequency_result,
-                }
-                with open(frequency_output_path, "w", encoding="utf-8") as handle:
-                    json.dump(frequency_payload, handle, indent=2)
-                optimization_metadata["frequency"] = frequency_payload
-            except Exception as exc:
-                logging.exception("Frequency calculation failed.")
-                failure_reason = str(exc) or "Frequency calculation failed."
-                frequency_payload = {
-                    "status": "failed",
-                    "output_file": frequency_output_path,
-                    "reason": failure_reason,
-                    "units": _frequency_units(),
-                    "versions": _frequency_versions(),
-                    "basis": sp_basis,
-                    "xc": sp_xc,
-                    "scf": sp_scf_config,
-                    "solvent": sp_solvent_name,
-                    "solvent_model": sp_solvent_model if sp_solvent_name else None,
-                    "solvent_eps": sp_eps,
-                    "dispersion": freq_dispersion_model,
-                    "dispersion_mode": freq_dispersion_mode,
-                    "results": None,
-                    "error": str(exc),
-                    "traceback": traceback.format_exc(),
-                }
-                with open(frequency_output_path, "w", encoding="utf-8") as handle:
-                    json.dump(frequency_payload, handle, indent=2)
-                optimization_metadata["frequency"] = frequency_payload
-        else:
-            frequency_payload = {
-                "status": "skipped",
-                "output_file": frequency_output_path,
-                "reason": "Frequency calculation disabled.",
-                "units": _frequency_units(),
-                "versions": _frequency_versions(),
-                "results": None,
-            }
-            with open(frequency_output_path, "w", encoding="utf-8") as handle:
-                json.dump(frequency_payload, handle, indent=2)
-            optimization_metadata["frequency"] = frequency_payload
-        run_single_point = False
-        sp_status = "skipped"
-        sp_skip_reason = None
-        if single_point_enabled:
-            if frequency_enabled:
-                expected_imaginary = 1 if optimizer_mode == "transition_state" else 0
-                if imaginary_count is None:
-                    logging.warning(
-                        "Skipping single-point calculation because imaginary frequency "
-                        "count is unavailable."
-                    )
-                    sp_skip_reason = "Imaginary frequency count unavailable."
-                elif imaginary_count == expected_imaginary:
-                    run_single_point = True
-                else:
-                    logging.warning(
-                        "Skipping single-point calculation because imaginary frequency "
-                        "count %s does not match expected %s.",
-                        imaginary_count,
-                        expected_imaginary,
-                    )
-                    sp_skip_reason = (
-                        "Imaginary frequency count does not match expected "
-                        f"{expected_imaginary}."
-                    )
-            else:
-                run_single_point = True
-        else:
-            logging.info("Skipping single-point energy calculation (disabled).")
-            sp_skip_reason = "Single-point calculation disabled."
-
-        if run_single_point:
-            sp_status = "executed"
-            sp_skip_reason = None
-
-        optimization_metadata["single_point"]["status"] = sp_status
-        optimization_metadata["single_point"]["skip_reason"] = sp_skip_reason
-        if frequency_payload is not None:
-            frequency_payload["single_point"] = {
-                "status": sp_status,
-                "skip_reason": sp_skip_reason,
-            }
-            with open(frequency_output_path, "w", encoding="utf-8") as handle:
-                json.dump(frequency_payload, handle, indent=2)
-
-        try:
-            if run_single_point:
-                logging.info("Calculating single-point energy for optimized geometry...")
-                sp_result = compute_single_point_energy(
-                    mol_optimized,
-                    sp_basis,
-                    sp_xc,
-                    sp_scf_config,
-                    sp_solvent_model if sp_solvent_name else None,
-                    sp_solvent_name,
-                    sp_eps,
-                    freq_dispersion_model,
-                    verbose,
-                    memory_mb,
-                    optimizer_mode=optimizer_mode,
-                    multiplicity=multiplicity,
-                )
-                final_sp_energy = sp_result["energy"]
-                final_sp_converged = sp_result["converged"]
-                final_sp_cycles = sp_result["cycles"]
-                optimization_metadata["single_point"]["dispersion_info"] = sp_result.get(
-                    "dispersion"
-                )
-                if final_sp_cycles is None:
-                    final_sp_cycles = parse_single_point_cycle_count(log_path)
-            elif single_point_enabled:
-                logging.info("Skipping single-point energy calculation.")
-        except Exception:
-            logging.exception("Single-point energy calculation failed.")
-            if run_single_point:
-                final_sp_energy = None
-                final_sp_converged = None
-                final_sp_cycles = parse_single_point_cycle_count(log_path)
-        optimization_metadata["n_steps"] = n_steps_value
-        optimization_metadata["n_steps_source"] = n_steps_source
-        optimization_metadata["summary"] = build_run_summary(
-            mf,
-            mol_optimized,
-            elapsed_seconds,
-            completed=True,
-            n_steps=n_steps_value,
-            final_sp_energy=final_sp_energy,
-            final_sp_converged=final_sp_converged,
-            final_sp_cycles=final_sp_cycles,
-        )
-        optimization_metadata["summary"]["memory_limit_enforced"] = memory_limit_enforced
-        write_run_metadata(run_metadata_path, optimization_metadata)
-        record_status_event(
-            event_log_path,
-            run_id,
-            run_dir,
-            "completed",
-            previous_status="running",
-        )
-        _update_foreground_queue("completed", exit_code=0)
     except Exception:
         logging.exception("Run failed.")
         if queue_tracking:
