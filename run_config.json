@@ -15,8 +15,6 @@
     "mode": "minimum",
     "output_xyz": "ase_optimized.xyz",
     "ase": {
-      "d3_command": null,
-      "d3_backend": "dftd3",
       "d3_params": {
         "damping": {
           "s6": 1.0,

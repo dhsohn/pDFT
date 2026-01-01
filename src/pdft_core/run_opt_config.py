@@ -94,11 +94,6 @@ RUN_CONFIG_SCHEMA = {
                     "properties": {
                         "d3_params": {"type": ["object", "null"]},
                         "dftd3_params": {"type": ["object", "null"]},
-                        "d3_backend": {"type": ["string", "null"], "enum": ["dftd3", "ase", None]},
-                        "dftd3_backend": {"type": ["string", "null"], "enum": ["dftd3", "ase", None]},
-                        "d3_command": {"type": ["string", "null"]},
-                        "dftd3_command": {"type": ["string", "null"]},
-                        "d3_command_validate": {"type": "boolean"},
                         "optimizer": {"type": ["string", "null"]},
                         "fmax": {"type": ["number", "integer", "null"]},
                         "steps": {"type": ["integer", "null"]},
@@ -306,11 +301,9 @@ RUN_CONFIG_EXAMPLES = {
     "irc": "\"irc\": {\"steps\": 10, \"step_size\": 0.05, \"force_threshold\": 0.01}",
     "optimizer": (
         "\"optimizer\": {\"mode\": \"minimum\", \"output_xyz\": \"ase_optimized.xyz\", "
-        "\"ase\": {\"d3_backend\": \"dftd3\", \"d3_command\": null, \"optimizer\": \"bfgs\"}}"
+        "\"ase\": {\"d3_params\": {\"damping\": {\"s6\": 1.0}}, \"optimizer\": \"bfgs\"}}"
     ),
-    "optimizer.ase": "\"ase\": {\"d3_backend\": \"dftd3\", \"d3_command\": null}",
-    "optimizer.ase.d3_backend": "\"d3_backend\": \"dftd3\"",
-    "optimizer.ase.d3_command_validate": "\"d3_command_validate\": true",
+    "optimizer.ase": "\"ase\": {\"d3_params\": {\"damping\": {\"s6\": 1.0}}}",
     "scf": (
         "\"scf\": {\"max_cycle\": 200, \"conv_tol\": 1e-7, \"diis\": 8, "
         "\"chkfile\": \"scf.chk\", \"extra\": {\"grids\": {\"level\": 3}}}"
@@ -377,11 +370,6 @@ class OptimizerASEConfig:
     raw: dict[str, Any]
     d3_params: dict[str, Any] | None = None
     dftd3_params: dict[str, Any] | None = None
-    d3_backend: str | None = None
-    dftd3_backend: str | None = None
-    d3_command: str | None = None
-    dftd3_command: str | None = None
-    d3_command_validate: bool | None = None
     optimizer: str | None = None
     fmax: float | None = None
     steps: int | None = None
@@ -399,11 +387,6 @@ class OptimizerASEConfig:
             raw=dict(data),
             d3_params=data.get("d3_params"),
             dftd3_params=data.get("dftd3_params"),
-            d3_backend=data.get("d3_backend"),
-            dftd3_backend=data.get("dftd3_backend"),
-            d3_command=data.get("d3_command"),
-            dftd3_command=data.get("dftd3_command"),
-            d3_command_validate=data.get("d3_command_validate"),
             optimizer=data.get("optimizer"),
             fmax=data.get("fmax"),
             steps=data.get("steps"),
@@ -1030,55 +1013,6 @@ def validate_run_config(config):
             if not isinstance(config["optimizer"]["ase"], dict):
                 raise ValueError("Config 'optimizer.ase' must be an object.")
             ase_config = config["optimizer"]["ase"]
-            d3_backend = ase_config.get("d3_backend") or ase_config.get("dftd3_backend")
-            d3_command = ase_config.get("d3_command") or ase_config.get("dftd3_command")
-            d3_command_validate = ase_config.get("d3_command_validate", True)
-            if "d3_command_validate" in ase_config and not isinstance(
-                d3_command_validate, bool
-            ):
-                raise ValueError("Config 'optimizer.ase.d3_command_validate' must be a boolean.")
-            if d3_command == "/path/to/dftd3":
-                raise ValueError(
-                    "Config 'optimizer.ase.d3_command' uses the placeholder '/path/to/dftd3'. "
-                    "Replace it with null and set \"d3_backend\": \"dftd3\" (recommended), or "
-                    "provide a real executable path such as \"/usr/local/bin/dftd3\". "
-                    "Recommended: \"d3_backend\": \"dftd3\", \"d3_command\": null."
-                )
-            normalized_backend = None
-            if d3_backend is not None:
-                if not isinstance(d3_backend, str):
-                    raise ValueError("Config 'optimizer.ase.d3_backend' must be a string.")
-                normalized_backend = d3_backend.strip().lower()
-                if normalized_backend not in ("dftd3", "ase"):
-                    raise ValueError(
-                        "Config 'optimizer.ase.d3_backend' must be one of: dftd3, ase. "
-                        "Example: \"d3_backend\": \"dftd3\"."
-                    )
-            if normalized_backend == "dftd3":
-                if d3_command not in (None, ""):
-                    raise ValueError(
-                        "Config 'optimizer.ase.d3_command' must be null or unset when "
-                        "'optimizer.ase.d3_backend' is 'dftd3'. Recommended: "
-                        "\"d3_backend\": \"dftd3\", \"d3_command\": null."
-                    )
-            if normalized_backend == "ase":
-                if not d3_command:
-                    raise ValueError(
-                        "Config 'optimizer.ase.d3_command' is required when "
-                        "'optimizer.ase.d3_backend' is 'ase'. Example: \"d3_command\": "
-                        "\"/usr/local/bin/dftd3\". Recommended: \"d3_backend\": \"dftd3\", "
-                        "\"d3_command\": null."
-                    )
-                if not isinstance(d3_command, str):
-                    raise ValueError("Config 'optimizer.ase.d3_command' must be a string path.")
-                if d3_command_validate and not (
-                    os.path.isfile(d3_command) and os.access(d3_command, os.X_OK)
-                ):
-                    raise ValueError(
-                        "Config 'optimizer.ase.d3_command' must point to an executable file. "
-                        "Example: \"d3_command\": \"/usr/local/bin/dftd3\". Recommended: "
-                        "\"d3_backend\": \"dftd3\", \"d3_command\": null."
-                    )
             d3_params = ase_config.get("d3_params")
             dftd3_params = ase_config.get("dftd3_params")
             if d3_params is not None and dftd3_params is not None:
