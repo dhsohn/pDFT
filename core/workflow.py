@@ -1760,11 +1760,11 @@ def run_optimization_stage(
     final_sp_cycles = None
     optimization_metadata["status"] = "completed"
     optimization_metadata["run_ended_at"] = datetime.now().isoformat()
-        _write_checkpoint(
-            atom_spec=optimized_atom_spec,
-            step=n_steps_value,
-            status="completed",
-        )
+    _write_checkpoint(
+        atom_spec=optimized_atom_spec,
+        step=n_steps_value,
+        status="completed",
+    )
     elapsed_seconds = time.perf_counter() - run_start
     n_steps_value = n_steps["value"] if n_steps_source else None
     imaginary_count = None
