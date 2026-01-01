@@ -163,8 +163,6 @@ conda-lock lock -f environment.yml -p win-64
 conda-lock install --name pdft conda-lock.yml
 ```
 
-다른 플랫폼이 필요하면 `-p osx-64`, `-p osx-arm64`, `-p win-64` 등을 추가해 다시 생성하세요.
-
 #### 3) PySCF 빌드
 ```bash
 git clone https://github.com/pyscf/pyscf.git
