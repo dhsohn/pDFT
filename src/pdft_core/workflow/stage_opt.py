@@ -568,10 +568,12 @@ def run_optimization_stage(
         expected_imaginary = 1 if optimizer_mode == "transition_state" else 0
         if frequency_enabled and imaginary_count is not None:
             ts_quality_result = (
-                frequency_payload.get("results", {}).get("ts_quality", {})
+                frequency_payload.get("results", {}).get("ts_quality")
                 if frequency_payload
-                else {}
+                else None
             )
+            if ts_quality_result is None:
+                ts_quality_result = {}
             allow_irc = ts_quality_result.get("allow_irc")
             if optimizer_mode == "transition_state" and allow_irc is not None:
                 if not allow_irc:
@@ -612,10 +614,12 @@ def run_optimization_stage(
                 sp_skip_reason = "Imaginary frequency count unavailable."
             elif optimizer_mode == "transition_state":
                 ts_quality_result = (
-                    frequency_payload.get("results", {}).get("ts_quality", {})
+                    frequency_payload.get("results", {}).get("ts_quality")
                     if frequency_payload
-                    else {}
+                    else None
                 )
+                if ts_quality_result is None:
+                    ts_quality_result = {}
                 allow_sp = ts_quality_result.get("allow_single_point")
                 if allow_sp is None:
                     allow_sp = imaginary_count == expected_imaginary
