@@ -34,16 +34,25 @@ def run_frequency_stage(stage_context, queue_update_fn):
             run_dir=stage_context["run_dir"],
             optimizer_mode=stage_context["optimizer_mode"],
             multiplicity=stage_context["multiplicity"],
+            ts_quality=stage_context.get("ts_quality"),
             log_override=False,
         )
         imaginary_check = frequency_result.get("imaginary_check") or {}
         imaginary_status = imaginary_check.get("status")
         imaginary_message = imaginary_check.get("message")
+        ts_quality_result = frequency_result.get("ts_quality") or {}
+        ts_quality_status = ts_quality_result.get("status")
+        ts_quality_message = ts_quality_result.get("message")
         if imaginary_message:
             if imaginary_status == "one_imaginary":
                 logging.info("Imaginary frequency check: %s", imaginary_message)
             else:
                 logging.warning("Imaginary frequency check: %s", imaginary_message)
+        if ts_quality_message:
+            if ts_quality_status in ("pass", "warn"):
+                logging.info("TS quality check: %s", ts_quality_message)
+            else:
+                logging.warning("TS quality check: %s", ts_quality_message)
         frequency_payload = {
             "status": "completed",
             "output_file": stage_context["frequency_output_path"],

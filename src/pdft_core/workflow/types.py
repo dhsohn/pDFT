@@ -18,6 +18,7 @@ class RunContext(TypedDict):
     scan_mode: str | None
     solvent_map_path: str
     single_point_config: Any
+    ts_quality: Any
     thermo: Any
     frequency_enabled: bool
     single_point_enabled: bool

@@ -45,6 +45,23 @@ SCAN_DIMENSION_SCHEMA = {
     "additionalProperties": True,
 }
 
+TS_INTERNAL_COORDINATE_SCHEMA = {
+    "type": "object",
+    "required": ["type", "i", "j"],
+    "properties": {
+        "type": {"type": "string", "enum": ["bond", "angle", "dihedral"]},
+        "i": {"type": "integer", "minimum": 0},
+        "j": {"type": "integer", "minimum": 0},
+        "k": {"type": "integer", "minimum": 0},
+        "l": {"type": "integer", "minimum": 0},
+        "target": {"type": ["number", "integer", "null"]},
+        "direction": {"type": ["string", "null"], "enum": ["increase", "decrease", None]},
+        "tolerance": {"type": ["number", "integer", "null"], "minimum": 0},
+        "label": {"type": ["string", "null"]},
+    },
+    "additionalProperties": True,
+}
+
 RUN_CONFIG_SCHEMA = {
     "type": "object",
     "required": ["basis", "xc", "solvent"],
@@ -294,6 +311,34 @@ RUN_CONFIG_SCHEMA = {
             },
             "additionalProperties": True,
         },
+        "ts_quality": {
+            "type": ["object", "null"],
+            "required": [],
+            "properties": {
+                "expected_imaginary_count": {"type": ["integer", "null"], "minimum": 0},
+                "imaginary_frequency_min_abs": {
+                    "type": ["number", "integer", "null"],
+                    "minimum": 0,
+                },
+                "imaginary_frequency_max_abs": {
+                    "type": ["number", "integer", "null"],
+                    "minimum": 0,
+                },
+                "projection_step": {
+                    "type": ["number", "integer", "null"],
+                    "exclusiveMinimum": 0,
+                },
+                "projection_min_abs": {
+                    "type": ["number", "integer", "null"],
+                    "minimum": 0,
+                },
+                "internal_coordinates": {
+                    "type": "array",
+                    "items": TS_INTERNAL_COORDINATE_SCHEMA,
+                },
+            },
+            "additionalProperties": True,
+        },
     },
     "additionalProperties": True,
 }
@@ -338,6 +383,13 @@ RUN_CONFIG_EXAMPLES = {
     "scan": (
         "\"scan\": {\"type\": \"bond\", \"i\": 0, \"j\": 1, \"start\": 1.0, "
         "\"end\": 2.0, \"step\": 0.1, \"mode\": \"optimization\"}"
+    ),
+    "ts_quality": (
+        "\"ts_quality\": {\"expected_imaginary_count\": 1, "
+        "\"imaginary_frequency_min_abs\": 50.0, \"imaginary_frequency_max_abs\": 1500.0, "
+        "\"projection_min_abs\": 0.01, "
+        "\"internal_coordinates\": [{\"type\": \"bond\", \"i\": 0, \"j\": 1, "
+        "\"target\": 2.0}]}"
     ),
 }
 
@@ -517,6 +569,36 @@ class IrcConfig:
 
 
 @dataclass(frozen=True)
+class TSQualityConfig:
+    raw: dict[str, Any]
+    expected_imaginary_count: int | None = None
+    imaginary_frequency_min_abs: float | None = None
+    imaginary_frequency_max_abs: float | None = None
+    projection_step: float | None = None
+    projection_min_abs: float | None = None
+    internal_coordinates: list[dict[str, Any]] | None = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "TSQualityConfig | None":
+        if data is None:
+            return None
+        if not isinstance(data, dict):
+            raise ValueError("Config 'ts_quality' must be an object.")
+        return cls(
+            raw=dict(data),
+            expected_imaginary_count=data.get("expected_imaginary_count"),
+            imaginary_frequency_min_abs=data.get("imaginary_frequency_min_abs"),
+            imaginary_frequency_max_abs=data.get("imaginary_frequency_max_abs"),
+            projection_step=data.get("projection_step"),
+            projection_min_abs=data.get("projection_min_abs"),
+            internal_coordinates=data.get("internal_coordinates"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.raw)
+
+
+@dataclass(frozen=True)
 class ThermoConfig:
     raw: dict[str, Any]
     temperature: float | None = None
@@ -571,6 +653,7 @@ class RunConfig:
     single_point: SinglePointConfig | None = None
     frequency: FrequencyConfig | None = None
     irc: IrcConfig | None = None
+    ts_quality: TSQualityConfig | None = None
     thermo: ThermoConfig | None = None
     constraints: dict[str, Any] | None = None
     scan: dict[str, Any] | None = None
@@ -613,6 +696,7 @@ class RunConfig:
             single_point=SinglePointConfig.from_dict(data.get("single_point")),
             frequency=FrequencyConfig.from_dict(frequency_block),
             irc=IrcConfig.from_dict(data.get("irc")),
+            ts_quality=TSQualityConfig.from_dict(data.get("ts_quality")),
             thermo=ThermoConfig.from_dict(data.get("thermo")),
             constraints=data.get("constraints"),
             scan=data.get("scan"),
@@ -1166,6 +1250,96 @@ def validate_run_config(config):
                 "dispersion_model": (is_str, "Config '{name}' must be a string."),
             }
             _validate_fields(config[frequency_key], frequency_rules, prefix=f"{frequency_key}.")
+    if "ts_quality" in config and config["ts_quality"] is not None:
+        if not isinstance(config["ts_quality"], dict):
+            raise ValueError("Config 'ts_quality' must be an object.")
+        ts_rules = {
+            "expected_imaginary_count": (
+                is_int,
+                "Config '{name}' must be an integer.",
+            ),
+            "imaginary_frequency_min_abs": (
+                is_number,
+                "Config '{name}' must be a number (int or float).",
+            ),
+            "imaginary_frequency_max_abs": (
+                is_number,
+                "Config '{name}' must be a number (int or float).",
+            ),
+            "projection_step": (
+                is_positive_number,
+                "Config '{name}' must be a positive number.",
+            ),
+            "projection_min_abs": (
+                is_number,
+                "Config '{name}' must be a number (int or float).",
+            ),
+        }
+        _validate_fields(config["ts_quality"], ts_rules, prefix="ts_quality.")
+        expected_count = config["ts_quality"].get("expected_imaginary_count")
+        if expected_count is not None and expected_count < 0:
+            raise ValueError("Config 'ts_quality.expected_imaginary_count' must be >= 0.")
+        min_abs = config["ts_quality"].get("imaginary_frequency_min_abs")
+        max_abs = config["ts_quality"].get("imaginary_frequency_max_abs")
+        if min_abs is not None and min_abs < 0:
+            raise ValueError("Config 'ts_quality.imaginary_frequency_min_abs' must be >= 0.")
+        if max_abs is not None and max_abs < 0:
+            raise ValueError("Config 'ts_quality.imaginary_frequency_max_abs' must be >= 0.")
+        if min_abs is not None and max_abs is not None and min_abs > max_abs:
+            raise ValueError(
+                "Config 'ts_quality.imaginary_frequency_min_abs' must be <= "
+                "'ts_quality.imaginary_frequency_max_abs'."
+            )
+        internal_coords = config["ts_quality"].get("internal_coordinates")
+        if internal_coords is not None:
+            if not isinstance(internal_coords, list):
+                raise ValueError("Config 'ts_quality.internal_coordinates' must be a list.")
+            for idx, coord in enumerate(internal_coords):
+                if not isinstance(coord, dict):
+                    raise ValueError(
+                        f"Config 'ts_quality.internal_coordinates[{idx}]' must be an object."
+                    )
+                coord_type = coord.get("type")
+                if coord_type not in ("bond", "angle", "dihedral"):
+                    raise ValueError(
+                        "Config 'ts_quality.internal_coordinates[{idx}].type' "
+                        "must be one of: bond, angle, dihedral.".format(idx=idx)
+                    )
+                required_indices = {
+                    "bond": ("i", "j"),
+                    "angle": ("i", "j", "k"),
+                    "dihedral": ("i", "j", "k", "l"),
+                }
+                for key in required_indices[coord_type]:
+                    value = coord.get(key)
+                    if not is_int(value) or value < 0:
+                        raise ValueError(
+                            "Config 'ts_quality.internal_coordinates[{idx}].{key}' "
+                            "must be an integer >= 0.".format(idx=idx, key=key)
+                        )
+                target = coord.get("target")
+                if target is not None and not is_number(target):
+                    raise ValueError(
+                        "Config 'ts_quality.internal_coordinates[{idx}].target' "
+                        "must be a number.".format(idx=idx)
+                    )
+                if coord.get("direction") is not None:
+                    if coord.get("direction") not in ("increase", "decrease"):
+                        raise ValueError(
+                            "Config 'ts_quality.internal_coordinates[{idx}].direction' "
+                            "must be 'increase' or 'decrease'.".format(idx=idx)
+                        )
+                if coord.get("target") is None and coord.get("direction") is None:
+                    raise ValueError(
+                        "Config 'ts_quality.internal_coordinates[{idx}]' must define "
+                        "'target' or 'direction'.".format(idx=idx)
+                    )
+                tolerance = coord.get("tolerance")
+                if tolerance is not None and tolerance < 0:
+                    raise ValueError(
+                        "Config 'ts_quality.internal_coordinates[{idx}].tolerance' "
+                        "must be >= 0.".format(idx=idx)
+                    )
     if "irc" in config and config["irc"] is not None:
         if not isinstance(config["irc"], dict):
             raise ValueError("Config 'irc' must be an object.")

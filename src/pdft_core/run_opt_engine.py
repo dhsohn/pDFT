@@ -503,6 +503,163 @@ def compute_single_point_energy(
     }
 
 
+DEFAULT_TS_IMAG_FREQ_MIN_ABS = 50.0
+DEFAULT_TS_IMAG_FREQ_MAX_ABS = 1500.0
+DEFAULT_TS_MODE_PROJECTION_STEP = 0.01
+
+
+def _extract_imaginary_mode_from_hessian(hess, mol, atomic_masses, atomic_numbers):
+    import numpy as np
+
+    hess = np.asarray(hess)
+    natm = mol.natm
+    if hess.ndim == 4:
+        hess = hess.reshape(natm * 3, natm * 3)
+    symbols = [mol.atom_symbol(i) for i in range(natm)]
+    masses = [atomic_masses[atomic_numbers[symbol]] for symbol in symbols]
+    mass_vector = np.repeat(np.asarray(masses, dtype=float), 3)
+    sqrt_mass = np.sqrt(mass_vector)
+    mass_weight = np.outer(sqrt_mass, sqrt_mass)
+    hess_mw = hess / mass_weight
+    eigvals, eigvecs = np.linalg.eigh(hess_mw)
+    min_index = int(np.argmin(eigvals))
+    mode_mw = eigvecs[:, min_index]
+    mode_cart = mode_mw / sqrt_mass
+    norm = np.linalg.norm(mode_cart)
+    if norm == 0:
+        raise ValueError("Failed to normalize imaginary mode; eigenvector norm is zero.")
+    mode_cart = mode_cart / norm
+    return {
+        "mode": mode_cart.reshape(natm, 3),
+        "eigenvalue": float(eigvals[min_index]),
+        "natoms": natm,
+        "symbols": symbols,
+    }
+
+
+def _evaluate_internal_coordinate(kind, positions, i, j, k=None, l=None):
+    import numpy as np
+
+    if kind == "bond":
+        return float(np.linalg.norm(positions[i] - positions[j]))
+    if kind == "angle":
+        v1 = positions[i] - positions[j]
+        v2 = positions[k] - positions[j]
+        dot = np.dot(v1, v2)
+        denom = np.linalg.norm(v1) * np.linalg.norm(v2)
+        if denom == 0:
+            raise ValueError("Zero-length vector encountered while computing angle.")
+        cos_angle = np.clip(dot / denom, -1.0, 1.0)
+        return float(np.degrees(np.arccos(cos_angle)))
+    if kind == "dihedral":
+        p0 = positions[i]
+        p1 = positions[j]
+        p2 = positions[k]
+        p3 = positions[l]
+        b0 = p0 - p1
+        b1 = p2 - p1
+        b2 = p3 - p2
+        b1_norm = np.linalg.norm(b1)
+        if b1_norm == 0:
+            raise ValueError("Zero-length bond encountered while computing dihedral.")
+        b1_unit = b1 / b1_norm
+        v = b0 - np.dot(b0, b1_unit) * b1_unit
+        w = b2 - np.dot(b2, b1_unit) * b1_unit
+        x = np.dot(v, w)
+        y = np.dot(np.cross(b1_unit, v), w)
+        return float(np.degrees(np.arctan2(y, x)))
+    raise ValueError(f"Unsupported internal coordinate type: {kind}")
+
+
+def _project_imaginary_mode_to_internal_coordinates(
+    positions,
+    mode,
+    internal_coordinates,
+    projection_step,
+    projection_min_abs,
+):
+    import numpy as np
+
+    if not internal_coordinates:
+        return {
+            "status": "not_configured",
+            "projection_step": projection_step,
+            "projection_min_abs": projection_min_abs,
+            "coordinates": [],
+        }
+    results = []
+    positions = np.asarray(positions, dtype=float)
+    mode = np.asarray(mode, dtype=float)
+    shifted_plus = positions + projection_step * mode
+    shifted_minus = positions - projection_step * mode
+    for entry in internal_coordinates:
+        kind = entry.get("type")
+        i = entry.get("i")
+        j = entry.get("j")
+        k = entry.get("k")
+        l = entry.get("l")
+        target = entry.get("target")
+        direction = entry.get("direction")
+        tolerance = entry.get("tolerance")
+        current = _evaluate_internal_coordinate(kind, positions, i, j, k, l)
+        value_plus = _evaluate_internal_coordinate(kind, shifted_plus, i, j, k, l)
+        value_minus = _evaluate_internal_coordinate(kind, shifted_minus, i, j, k, l)
+        projection = (value_plus - value_minus) / (2 * projection_step)
+        desired_sign = None
+        alignment = None
+        delta = None
+        if target is not None:
+            delta = target - current
+            if tolerance is not None and abs(delta) <= tolerance:
+                alignment = "aligned"
+            elif delta == 0:
+                alignment = "aligned"
+            else:
+                desired_sign = 1.0 if delta > 0 else -1.0
+        if desired_sign is None and direction:
+            desired_sign = 1.0 if direction == "increase" else -1.0
+        if alignment is None:
+            if abs(projection) < projection_min_abs:
+                alignment = "weak"
+            elif desired_sign is None:
+                alignment = "unknown"
+            elif projection * desired_sign > 0:
+                alignment = "aligned"
+            else:
+                alignment = "misaligned"
+        results.append(
+            {
+                "type": kind,
+                "i": i,
+                "j": j,
+                "k": k,
+                "l": l,
+                "current": current,
+                "target": target,
+                "delta_to_target": delta,
+                "direction": direction,
+                "tolerance": tolerance,
+                "projection": float(projection),
+                "status": alignment,
+            }
+        )
+    statuses = {item["status"] for item in results}
+    if "misaligned" in statuses:
+        overall = "misaligned"
+    elif "weak" in statuses:
+        overall = "weak"
+    elif "unknown" in statuses:
+        overall = "unknown"
+    else:
+        overall = "aligned"
+    return {
+        "status": overall,
+        "projection_step": projection_step,
+        "projection_min_abs": projection_min_abs,
+        "coordinates": results,
+    }
+
+
 def compute_frequencies(
     mol,
     basis,
@@ -519,10 +676,12 @@ def compute_frequencies(
     run_dir=None,
     optimizer_mode=None,
     multiplicity=None,
+    ts_quality=None,
     log_override=True,
 ):
     from ase import units
     from ase import Atoms
+    from ase.data import atomic_masses, atomic_numbers
     from pyscf import dft, hessian as pyscf_hessian
     from pyscf.hessian import thermo as pyscf_thermo
 
@@ -680,8 +839,10 @@ def compute_frequencies(
     imaginary_message = None
     min_frequency = None
     max_frequency = None
+    imaginary_frequencies = []
     if freq_wavenumber_list:
-        imaginary_count = sum(1 for value in freq_wavenumber_list if value < 0)
+        imaginary_frequencies = [value for value in freq_wavenumber_list if value < 0]
+        imaginary_count = len(imaginary_frequencies)
         min_frequency = min(freq_wavenumber_list)
         max_frequency = max(freq_wavenumber_list)
         if imaginary_count == 0:
@@ -704,6 +865,136 @@ def compute_frequencies(
         imaginary_status = "unknown"
         imaginary_message = "No frequency data available to assess imaginary modes."
 
+    ts_quality_payload = None
+    ts_quality_settings = {}
+    if ts_quality is not None:
+        if hasattr(ts_quality, "to_dict"):
+            ts_quality_settings = ts_quality.to_dict()
+        elif isinstance(ts_quality, dict):
+            ts_quality_settings = dict(ts_quality)
+    expected_imaginary_count = ts_quality_settings.get("expected_imaginary_count")
+    if expected_imaginary_count is None and optimizer_mode == "transition_state":
+        expected_imaginary_count = 1
+    min_abs = ts_quality_settings.get("imaginary_frequency_min_abs")
+    max_abs = ts_quality_settings.get("imaginary_frequency_max_abs")
+    if optimizer_mode == "transition_state":
+        if min_abs is None:
+            min_abs = DEFAULT_TS_IMAG_FREQ_MIN_ABS
+        if max_abs is None:
+            max_abs = DEFAULT_TS_IMAG_FREQ_MAX_ABS
+    projection_step = ts_quality_settings.get("projection_step") or DEFAULT_TS_MODE_PROJECTION_STEP
+    projection_min_abs = ts_quality_settings.get("projection_min_abs") or 0.0
+    internal_coordinates = ts_quality_settings.get("internal_coordinates") or []
+    if (
+        expected_imaginary_count is not None
+        or min_abs is not None
+        or max_abs is not None
+        or internal_coordinates
+        or optimizer_mode == "transition_state"
+    ):
+        imaginary_abs = None
+        imaginary_value = None
+        if imaginary_frequencies:
+            imaginary_value = min(imaginary_frequencies)
+            imaginary_abs = abs(imaginary_value)
+        count_ok = None
+        if expected_imaginary_count is not None and imaginary_count is not None:
+            count_ok = imaginary_count == expected_imaginary_count
+        range_status = "unknown"
+        range_message = None
+        if imaginary_abs is not None and (min_abs is not None or max_abs is not None):
+            if min_abs is not None and imaginary_abs < min_abs:
+                range_status = "too_small"
+                range_message = (
+                    f"Imaginary frequency magnitude {imaginary_abs:.2f} cm^-1 "
+                    f"is below the minimum {min_abs:.2f} cm^-1."
+                )
+            elif max_abs is not None and imaginary_abs > max_abs:
+                range_status = "too_large"
+                range_message = (
+                    f"Imaginary frequency magnitude {imaginary_abs:.2f} cm^-1 "
+                    f"exceeds the maximum {max_abs:.2f} cm^-1."
+                )
+            else:
+                range_status = "ok"
+        alignment_result = {
+            "status": "not_configured",
+            "projection_step": projection_step,
+            "projection_min_abs": projection_min_abs,
+            "coordinates": [],
+        }
+        mode_result = None
+        alignment_error = None
+        if internal_coordinates:
+            try:
+                mode_result = _extract_imaginary_mode_from_hessian(
+                    hess, mol_freq, atomic_masses, atomic_numbers
+                )
+                alignment_result = _project_imaginary_mode_to_internal_coordinates(
+                    positions=mol_freq.atom_coords(unit="Angstrom"),
+                    mode=mode_result["mode"],
+                    internal_coordinates=internal_coordinates,
+                    projection_step=projection_step,
+                    projection_min_abs=projection_min_abs,
+                )
+            except Exception as exc:
+                alignment_error = str(exc)
+                alignment_result = {
+                    "status": "unknown",
+                    "projection_step": projection_step,
+                    "projection_min_abs": projection_min_abs,
+                    "coordinates": [],
+                    "error": alignment_error,
+                }
+        status = "pass"
+        messages = []
+        if count_ok is False:
+            status = "fail"
+            messages.append(
+                "Imaginary frequency count does not match expected "
+                f"{expected_imaginary_count}."
+            )
+        if alignment_result.get("status") == "misaligned":
+            status = "fail"
+            messages.append("Imaginary mode is misaligned with target coordinates.")
+        if range_status in ("too_small", "too_large"):
+            if status != "fail":
+                status = "warn"
+            if range_message:
+                messages.append(range_message)
+        if alignment_result.get("status") in ("weak", "unknown"):
+            if status == "pass":
+                status = "warn"
+            if alignment_result.get("status") == "weak":
+                messages.append("Imaginary mode projection is weak for target coordinates.")
+            else:
+                messages.append("Imaginary mode alignment could not be determined.")
+        if status == "pass" and not messages:
+            messages.append("Transition-state quality checks passed.")
+        allow_irc = None
+        allow_single_point = None
+        if optimizer_mode == "transition_state":
+            allow_irc = status in ("pass", "warn")
+            allow_single_point = allow_irc
+        ts_quality_payload = {
+            "status": status,
+            "message": " ".join(messages) if messages else None,
+            "expected_imaginary_count": expected_imaginary_count,
+            "imaginary_count": imaginary_count,
+            "imaginary_count_ok": count_ok,
+            "imaginary_frequency": imaginary_value,
+            "imaginary_frequency_abs": imaginary_abs,
+            "imaginary_frequency_range": {
+                "min_abs": min_abs,
+                "max_abs": max_abs,
+                "status": range_status,
+                "message": range_message,
+            },
+            "internal_coordinate_alignment": alignment_result,
+            "allow_irc": allow_irc,
+            "allow_single_point": allow_single_point,
+        }
+
     return {
         "energy": energy,
         "converged": getattr(mf_freq, "converged", None),
@@ -718,6 +1009,7 @@ def compute_frequencies(
         },
         "min_frequency": min_frequency,
         "max_frequency": max_frequency,
+        "ts_quality": ts_quality_payload,
         "dispersion": dispersion_info,
         "thermochemistry": thermochemistry,
     }
@@ -738,7 +1030,6 @@ def compute_imaginary_mode(
     multiplicity=None,
     log_override=True,
 ):
-    import numpy as np
     try:
         from ase.data import atomic_masses, atomic_numbers
     except ImportError as exc:
@@ -785,30 +1076,9 @@ def compute_imaginary_mode(
         hess = mf_mode.Hessian().kernel()
     else:
         hess = pyscf_hessian.Hessian(mf_mode).kernel()
-    hess = np.asarray(hess)
-    natm = mol_mode.natm
-    if hess.ndim == 4:
-        hess = hess.reshape(natm * 3, natm * 3)
-    symbols = [mol_mode.atom_symbol(i) for i in range(natm)]
-    masses = [atomic_masses[atomic_numbers[symbol]] for symbol in symbols]
-    mass_vector = np.repeat(np.asarray(masses, dtype=float), 3)
-    sqrt_mass = np.sqrt(mass_vector)
-    mass_weight = np.outer(sqrt_mass, sqrt_mass)
-    hess_mw = hess / mass_weight
-    eigvals, eigvecs = np.linalg.eigh(hess_mw)
-    min_index = int(np.argmin(eigvals))
-    mode_mw = eigvecs[:, min_index]
-    mode_cart = mode_mw / sqrt_mass
-    norm = np.linalg.norm(mode_cart)
-    if norm == 0:
-        raise ValueError("Failed to normalize imaginary mode; eigenvector norm is zero.")
-    mode_cart = mode_cart / norm
-    return {
-        "mode": mode_cart.reshape(natm, 3),
-        "eigenvalue": float(eigvals[min_index]),
-        "natoms": natm,
-        "symbols": symbols,
-    }
+    return _extract_imaginary_mode_from_hessian(
+        hess, mol_mode, atomic_masses, atomic_numbers
+    )
 
 
 def run_capability_check(
