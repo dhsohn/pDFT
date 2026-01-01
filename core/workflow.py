@@ -646,6 +646,8 @@ def prepare_run_context(args, config: RunConfig, config_raw):
             config_used_file.write(config_raw)
         args.config = config_used_path
 
+    run_id = args.run_id or str(uuid.uuid4())
+    args.run_id = run_id
     checkpoint_path = resolve_run_path(run_dir, "checkpoint.json")
     if not resume_dir:
         checkpoint_payload = {
@@ -660,7 +662,6 @@ def prepare_run_context(args, config: RunConfig, config_raw):
     elif pyscf_chkfile:
         _warn_missing_chkfile("Resume mode:", pyscf_chkfile)
 
-    run_id = args.run_id or str(uuid.uuid4())
     event_log_path = resolve_run_path(
         run_dir, config.event_log_file or DEFAULT_EVENT_LOG_PATH
     )
