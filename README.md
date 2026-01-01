@@ -57,7 +57,6 @@ PySCF(DFT/SCF/gradient/Hessian)와 ASE(최적화 드라이버)를 결합해 **�
 - `d3bj`, `d3zero`, `d4`를 지원합니다.
 - **권장 백엔드: `dftd3-python`(simple-dftd3)**  
   외부 `dftd3` 실행파일 없이 동작하도록 설계되어 있습니다.
-- ASE 외부 바이너리 래퍼(legacy)도 지원하지만, 그 경우 `d3_command`로 실제 `dftd3` 경로가 필요합니다.
 
 > 참고: XC 함수 자체에 dispersion이 포함된 것으로 판단되면(예: 이름이 `...-d`, `...d3` 등으로 끝나는 경우) 별도 D3/D4 설정을 무시하도록 되어 있습니다.
 
@@ -464,10 +463,7 @@ python -m pytest tests
 - `optimizer.ase.trajectory`, `optimizer.ase.logfile`: 진행 로그/trajectory 파일명
 
 ### 분산(D3) 관련
-- 권장:
-  - `optimizer.ase.d3_backend: "dftd3"`
-  - `optimizer.ase.d3_command: null`
-  - (선택) `optimizer.ase.d3_params.damping`: `s6, s8, a1, a2` 등
+- (선택) `optimizer.ase.d3_params.damping`: `s6, s8, a1, a2` 등
 
 ### IRC 관련
 - `irc_enabled`: `true|false` (최적화 모드에서 IRC 후속 계산을 강제)
@@ -491,22 +487,18 @@ python -m pytest tests
 
 ## 트러블슈팅
 
-### 1) `DFTD3 command '/path/to/dftd3' was not found`
-- 원인: `optimizer.ase.d3_backend`가 `"ase"`로 잡혔고, `d3_command`가 실제 경로가 아님
-- 해결(권장): `d3_backend="dftd3"`, `d3_command=null`로 통일
-
-### 2) `KeyError: 'bj'` (D3 damping 관련)
+### 1) `KeyError: 'bj'` (D3 damping 관련)
 - 원인: `dftd3-python` 백엔드에 `damping="bj"`를 넘긴 경우
 - 해결: `dftd3-python`에서는 `damping="d3bj"` 형태가 필요하며, 설정 파서가 이를 자동 매핑하도록 되어 있어야 합니다.
 
-### 3) `JSONDecodeError: Extra data`
+### 2) `JSONDecodeError: Extra data`
 - 원인: 설정 파일이 “JSON 객체 2개가 붙어있음” 등으로 문법이 깨짐
 - 해결:
   ```bash
   python -m json.tool run_config.json > /dev/null
   ```
 
-### 4) `cannot import name 'dft' from 'pyscf'`
+### 3) `cannot import name 'dft' from 'pyscf'`
 - 원인: 환경 꼬임/namespace 충돌(가짜 `pyscf`가 import됨) 가능성이 큼
 - 해결:
   ```bash
@@ -514,7 +506,7 @@ python -m pytest tests
   ```
   출력이 이상하거나 `None`이면 PySCF를 재설치/환경 정리가 필요합니다.
 
-### 5) `ModuleNotFoundError: No module named 'pytest'` (테스트 실행 시)
+### 4) `ModuleNotFoundError: No module named 'pytest'` (테스트 실행 시)
 - 원인: 개발용 테스트 의존성이 설치되지 않음
 - 해결:
   ```bash
