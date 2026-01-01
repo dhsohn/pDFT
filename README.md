@@ -55,10 +55,6 @@ PySCF(DFT/SCF/gradient/Hessian)와 ASE(최적화 드라이버)를 결합해 **�
 
 ### 3) 분산 보정(Dispersion)
 - `d3bj`, `d3zero`, `d4`를 지원합니다.
-- D3 보정은 `dftd3-python`(simple-dftd3) 백엔드만 사용합니다.
-- **권장 백엔드: `dftd3-python`(simple-dftd3)**  
-  외부 `dftd3` 실행파일 없이 동작하도록 설계되어 있습니다.
-
 > 참고: XC 함수 자체에 dispersion이 포함된 것으로 판단되면(예: 이름이 `...-d`, `...d3` 등으로 끝나는 경우) 별도 D3/D4 설정을 무시하도록 되어 있습니다.
 
 ### 4) 스캔(1D/2D) 계산 **(신규 기능)**
@@ -136,7 +132,7 @@ pDFT/
 #### 1) `environment.yml`로 기본 환경 구성
 ```bash
 conda env create -f environment.yml
-conda activate pdft
+conda activate pDFT
 ```
 
 - `environment.yml`에는 **Python 3.12**, PySCF 빌드를 위한 툴체인/라이브러리, ASE, D3/D4 의존성이 포함되어 있습니다.
@@ -155,11 +151,21 @@ conda-lock lock -f environment.yml -p linux-64
 conda-lock install --name pdft conda-lock.yml
 ```
 
+```bash
+conda install -c conda-forge conda-lock -y
+conda-lock lock -f environment.yml -p osx-arm64
+conda-lock install --name pdft conda-lock.yml
+```
+
+```bash
+conda install -c conda-forge conda-lock -y
+conda-lock lock -f environment.yml -p win-64
+conda-lock install --name pdft conda-lock.yml
+```
+
 다른 플랫폼이 필요하면 `-p osx-64`, `-p osx-arm64`, `-p win-64` 등을 추가해 다시 생성하세요.
 
-#### 3) PySCF 설치/빌드 (SMD 필수)
-SMD 사용이 **필수**이므로 PySCF를 소스에서 직접 빌드해 활성화합니다.
-
+#### 3) PySCF 빌드
 ```bash
 git clone https://github.com/pyscf/pyscf.git
 cd pyscf
@@ -181,7 +187,7 @@ python -m pip install -e . --no-build-isolation
 프로젝트 루트에서 실행:
 
 ```bash
-conda activate DFT
+conda activate pDFT
 cd pDFT
 python run_opt.py
 ```
