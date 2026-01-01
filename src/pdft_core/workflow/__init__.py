@@ -603,6 +603,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                     "calc_dispersion_model": calc_dispersion_model,
                     "freq_dispersion_mode": freq_dispersion_mode,
                     "thermo": context["thermo"],
+                    "ts_quality": context.get("ts_quality"),
                     "verbose": verbose,
                     "memory_mb": memory_mb,
                     "optimizer_mode": optimizer_mode,

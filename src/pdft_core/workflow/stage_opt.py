@@ -478,6 +478,7 @@ def run_optimization_stage(
                 run_dir=run_dir,
                 optimizer_mode=optimizer_mode,
                 multiplicity=multiplicity,
+                ts_quality=context.get("ts_quality"),
             )
             last_scf_energy = frequency_result.get("energy")
             last_scf_converged = frequency_result.get("converged")
@@ -485,11 +486,19 @@ def run_optimization_stage(
             imaginary_check = frequency_result.get("imaginary_check") or {}
             imaginary_status = imaginary_check.get("status")
             imaginary_message = imaginary_check.get("message")
+            ts_quality_result = frequency_result.get("ts_quality") or {}
+            ts_quality_status = ts_quality_result.get("status")
+            ts_quality_message = ts_quality_result.get("message")
             if imaginary_message:
                 if imaginary_status == "one_imaginary":
                     logging.info("Imaginary frequency check: %s", imaginary_message)
                 else:
                     logging.warning("Imaginary frequency check: %s", imaginary_message)
+            if ts_quality_message:
+                if ts_quality_status in ("pass", "warn"):
+                    logging.info("TS quality check: %s", ts_quality_message)
+                else:
+                    logging.warning("TS quality check: %s", ts_quality_message)
             frequency_payload = {
                 "status": "completed",
                 "output_file": frequency_output_path,
@@ -558,7 +567,23 @@ def run_optimization_stage(
     if irc_enabled:
         expected_imaginary = 1 if optimizer_mode == "transition_state" else 0
         if frequency_enabled and imaginary_count is not None:
-            if imaginary_count != expected_imaginary:
+            ts_quality_result = (
+                frequency_payload.get("results", {}).get("ts_quality")
+                if frequency_payload
+                else None
+            )
+            if ts_quality_result is None:
+                ts_quality_result = {}
+            allow_irc = ts_quality_result.get("allow_irc")
+            if optimizer_mode == "transition_state" and allow_irc is not None:
+                if not allow_irc:
+                    irc_skip_reason = ts_quality_result.get("message") or (
+                        "TS quality checks did not pass; skipping IRC."
+                    )
+                    logging.warning("Skipping IRC: %s", irc_skip_reason)
+                else:
+                    irc_status = "pending"
+            elif imaginary_count != expected_imaginary:
                 irc_skip_reason = (
                     "Imaginary frequency count does not match expected "
                     f"{expected_imaginary}."
@@ -587,6 +612,27 @@ def run_optimization_stage(
                     "count is unavailable."
                 )
                 sp_skip_reason = "Imaginary frequency count unavailable."
+            elif optimizer_mode == "transition_state":
+                ts_quality_result = (
+                    frequency_payload.get("results", {}).get("ts_quality")
+                    if frequency_payload
+                    else None
+                )
+                if ts_quality_result is None:
+                    ts_quality_result = {}
+                allow_sp = ts_quality_result.get("allow_single_point")
+                if allow_sp is None:
+                    allow_sp = imaginary_count == expected_imaginary
+                if allow_sp:
+                    run_single_point = True
+                else:
+                    logging.warning(
+                        "Skipping single-point calculation due to TS quality checks."
+                    )
+                    sp_skip_reason = (
+                        ts_quality_result.get("message")
+                        or "TS quality checks did not pass."
+                    )
             elif imaginary_count == expected_imaginary:
                 run_single_point = True
             else:

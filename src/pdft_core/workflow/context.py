@@ -75,6 +75,7 @@ def prepare_run_context(args, config: RunConfig, config_raw) -> RunContext:
         )
     solvent_map_path = config.solvent_map or DEFAULT_SOLVENT_MAP_PATH
     single_point_config = config.single_point
+    ts_quality_config = config.ts_quality
     thermo_config = config.thermo
     frequency_enabled, single_point_enabled = _normalize_stage_flags(
         config, calculation_mode
@@ -204,6 +205,7 @@ def prepare_run_context(args, config: RunConfig, config_raw) -> RunContext:
         "scan_mode": scan_mode,
         "solvent_map_path": solvent_map_path,
         "single_point_config": single_point_config,
+        "ts_quality": ts_quality_config,
         "thermo": thermo_config,
         "frequency_enabled": frequency_enabled,
         "single_point_enabled": single_point_enabled,
