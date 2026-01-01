@@ -46,6 +46,8 @@ from .run_opt_config import (
     DEFAULT_THREAD_COUNT,
     RunConfig,
     load_solvent_map,
+    load_solvent_map_from_path,
+    load_solvent_map_from_resource,
 )
 from .run_opt_logging import ensure_stream_newlines, setup_logging
 from .run_opt_metadata import (
@@ -484,7 +486,7 @@ def run_doctor():
         _record_check(display_label, ok, hint if not ok else None)
         return ok
 
-    def _solvent_map_hint(error):
+    def _solvent_map_path_hint(error):
         if isinstance(error, FileNotFoundError):
             return (
                 "Missing solvent map file. Provide --solvent-map or restore "
@@ -494,11 +496,27 @@ def run_doctor():
             return "Invalid JSON in solvent map. Fix the JSON syntax."
         return "Unable to read solvent map. Check file permissions and path."
 
+    def _solvent_map_resource_hint(error):
+        if isinstance(error, FileNotFoundError):
+            return (
+                "Missing solvent map package resource. Reinstall with packaged data "
+                "or update the installation."
+            )
+        if isinstance(error, json.JSONDecodeError):
+            return "Invalid JSON in package solvent map. Reinstall package data."
+        return "Unable to read package solvent map. Check package installation."
+
     try:
-        load_solvent_map(DEFAULT_SOLVENT_MAP_PATH)
-        _record_check("solvent_map", True)
+        load_solvent_map_from_path(DEFAULT_SOLVENT_MAP_PATH)
+        _record_check("solvent_map (file path)", True)
     except Exception as exc:
-        _record_check("solvent_map", False, _solvent_map_hint(exc))
+        _record_check("solvent_map (file path)", False, _solvent_map_path_hint(exc))
+
+    try:
+        load_solvent_map_from_resource()
+        _record_check("solvent_map (package resource)", True)
+    except Exception as exc:
+        _record_check("solvent_map (package resource)", False, _solvent_map_resource_hint(exc))
 
     checks = [
         ("ase", "Install with: pip install ase"),
