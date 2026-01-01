@@ -123,6 +123,26 @@ def _frequency_units():
     }
 
 
+def _resolve_scf_chkfile(scf_config, run_dir):
+    if not scf_config:
+        return None
+    chkfile = scf_config.get("chkfile")
+    if not chkfile:
+        return None
+    resolved = resolve_run_path(run_dir, chkfile)
+    scf_config["chkfile"] = resolved
+    return resolved
+
+
+def _warn_missing_chkfile(resume_label, chkfile_path):
+    if chkfile_path and not os.path.exists(chkfile_path):
+        logging.warning(
+            "%s PySCF chkfile not found at %s; continuing without chkfile init.",
+            resume_label,
+            chkfile_path,
+        )
+
+
 def _frequency_versions():
     return {
         "ase": get_package_version("ase"),
@@ -569,6 +589,7 @@ def prepare_run_context(args, config: RunConfig, config_raw):
     log_path = resolve_run_path(run_dir, config.log_file or DEFAULT_LOG_PATH)
     log_path = format_log_path(log_path)
     scf_config = config.scf.to_dict() if config.scf else {}
+    pyscf_chkfile = _resolve_scf_chkfile(scf_config, run_dir)
     optimized_xyz_path = resolve_run_path(
         run_dir, config.optimized_xyz_file or DEFAULT_OPTIMIZED_XYZ_PATH
     )
@@ -605,6 +626,8 @@ def prepare_run_context(args, config: RunConfig, config_raw):
             "config_raw": config_raw,
         }
         write_checkpoint(checkpoint_path, checkpoint_payload)
+    elif pyscf_chkfile:
+        _warn_missing_chkfile("Resume mode:", pyscf_chkfile)
 
     run_id = args.run_id or str(uuid.uuid4())
     event_log_path = resolve_run_path(
@@ -647,6 +670,8 @@ def prepare_run_context(args, config: RunConfig, config_raw):
         "scan_result_path": scan_result_path,
         "event_log_path": event_log_path,
         "run_id": run_id,
+        "resume_dir": resume_dir,
+        "pyscf_chkfile": pyscf_chkfile,
         "irc_enabled": irc_enabled,
         "irc_config": irc_config,
         "previous_status": getattr(args, "resume_previous_status", None),
@@ -830,6 +855,25 @@ def finalize_metadata(
         queue_update_fn(status, exit_code=exit_code)
 
 
+def _update_checkpoint_scf(checkpoint_path, pyscf_chkfile=None, scf_energy=None, scf_converged=None):
+    if not checkpoint_path:
+        return
+    checkpoint_payload = {}
+    if os.path.exists(checkpoint_path):
+        try:
+            with open(checkpoint_path, "r", encoding="utf-8") as checkpoint_file:
+                checkpoint_payload = json.load(checkpoint_file)
+        except (OSError, json.JSONDecodeError):
+            checkpoint_payload = {}
+    if pyscf_chkfile is not None:
+        checkpoint_payload["pyscf_chkfile"] = pyscf_chkfile
+    if scf_energy is not None:
+        checkpoint_payload["last_scf_energy"] = scf_energy
+    if scf_converged is not None:
+        checkpoint_payload["last_scf_converged"] = scf_converged
+    write_checkpoint(checkpoint_path, checkpoint_payload)
+
+
 def run_single_point_stage(stage_context, queue_update_fn):
     logging.info("Starting single-point energy calculation...")
     run_start = stage_context["run_start"]
@@ -846,6 +890,7 @@ def run_single_point_stage(stage_context, queue_update_fn):
             stage_context["calc_dispersion_model"],
             stage_context["verbose"],
             stage_context["memory_mb"],
+            run_dir=stage_context["run_dir"],
             optimizer_mode=stage_context["optimizer_mode"],
             multiplicity=stage_context["multiplicity"],
             log_override=False,
@@ -870,6 +915,12 @@ def run_single_point_stage(stage_context, queue_update_fn):
         calculation_metadata["summary"]["memory_limit_enforced"] = stage_context[
             "memory_limit_enforced"
         ]
+        _update_checkpoint_scf(
+            stage_context.get("checkpoint_path"),
+            pyscf_chkfile=stage_context.get("pyscf_chkfile"),
+            scf_energy=energy,
+            scf_converged=sp_converged,
+        )
         finalize_metadata(
             stage_context["run_metadata_path"],
             stage_context["event_log_path"],
@@ -917,6 +968,7 @@ def run_frequency_stage(stage_context, queue_update_fn):
             stage_context["thermo"],
             stage_context["verbose"],
             stage_context["memory_mb"],
+            run_dir=stage_context["run_dir"],
             optimizer_mode=stage_context["optimizer_mode"],
             multiplicity=stage_context["multiplicity"],
             log_override=False,
@@ -974,6 +1026,12 @@ def run_frequency_stage(stage_context, queue_update_fn):
         calculation_metadata["summary"]["memory_limit_enforced"] = stage_context[
             "memory_limit_enforced"
         ]
+        _update_checkpoint_scf(
+            stage_context.get("checkpoint_path"),
+            pyscf_chkfile=stage_context.get("pyscf_chkfile"),
+            scf_energy=frequency_result.get("energy"),
+            scf_converged=frequency_result.get("converged"),
+        )
         finalize_metadata(
             stage_context["run_metadata_path"],
             stage_context["event_log_path"],
@@ -1300,6 +1358,7 @@ def run_scan_stage(
                 calc_dispersion_model,
                 verbose,
                 memory_mb,
+                run_dir=run_dir,
                 optimizer_mode=optimizer_mode,
                 multiplicity=multiplicity,
                 log_override=False,
@@ -1631,6 +1690,8 @@ def run_optimization_stage(
         step=None,
         status=None,
         error_message=None,
+        scf_energy=None,
+        scf_converged=None,
     ):
         checkpoint_payload = dict(checkpoint_base)
         if atom_spec is not None:
@@ -1652,6 +1713,10 @@ def run_optimization_stage(
                 "pyscf_chkfile": pyscf_chkfile,
             }
         )
+        if scf_energy is not None:
+            checkpoint_payload["last_scf_energy"] = scf_energy
+        if scf_converged is not None:
+            checkpoint_payload["last_scf_converged"] = scf_converged
         if status is not None:
             checkpoint_payload["status"] = status
         if error_message is not None:
@@ -1758,6 +1823,8 @@ def run_optimization_stage(
     final_sp_energy = None
     final_sp_converged = None
     final_sp_cycles = None
+    last_scf_energy = None
+    last_scf_converged = None
     optimization_metadata["status"] = "completed"
     optimization_metadata["run_ended_at"] = datetime.now().isoformat()
     _write_checkpoint(
@@ -1785,9 +1852,12 @@ def run_optimization_stage(
                 context["thermo"],
                 verbose,
                 memory_mb,
+                run_dir=run_dir,
                 optimizer_mode=optimizer_mode,
                 multiplicity=multiplicity,
             )
+            last_scf_energy = frequency_result.get("energy")
+            last_scf_converged = frequency_result.get("converged")
             imaginary_count = frequency_result.get("imaginary_count")
             imaginary_check = frequency_result.get("imaginary_check") or {}
             imaginary_status = imaginary_check.get("status")
@@ -1956,6 +2026,7 @@ def run_optimization_stage(
                     context["sp_eps"],
                     verbose,
                     memory_mb,
+                    run_dir=run_dir,
                     optimizer_mode=optimizer_mode,
                     multiplicity=multiplicity,
                 )
@@ -2030,12 +2101,15 @@ def run_optimization_stage(
                 context["freq_dispersion_model"],
                 verbose,
                 memory_mb,
+                run_dir=run_dir,
                 optimizer_mode=optimizer_mode,
                 multiplicity=multiplicity,
             )
             final_sp_energy = sp_result["energy"]
             final_sp_converged = sp_result["converged"]
             final_sp_cycles = sp_result["cycles"]
+            last_scf_energy = final_sp_energy
+            last_scf_converged = final_sp_converged
             optimization_metadata["single_point"]["dispersion_info"] = sp_result.get(
                 "dispersion"
             )
@@ -2062,6 +2136,10 @@ def run_optimization_stage(
         final_sp_cycles=final_sp_cycles,
     )
     optimization_metadata["summary"]["memory_limit_enforced"] = memory_limit_enforced
+    _write_checkpoint(
+        scf_energy=last_scf_energy,
+        scf_converged=last_scf_converged,
+    )
     write_run_metadata(run_metadata_path, optimization_metadata)
     record_status_event(
         event_log_path,
@@ -2226,6 +2304,9 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
             if single_point_config and single_point_config.scf
             else scf_config
         )
+        sp_chkfile = _resolve_scf_chkfile(sp_scf_config, run_dir)
+        if context.get("resume_dir") and sp_chkfile and sp_chkfile != context.get("pyscf_chkfile"):
+            _warn_missing_chkfile("Resume mode (single-point):", sp_chkfile)
         sp_solvent_name = (
             single_point_config.solvent
             if single_point_config and single_point_config.solvent
@@ -2527,6 +2608,8 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 "event_log_path": event_log_path,
                 "run_id": run_id,
                 "run_dir": run_dir,
+                "checkpoint_path": context["checkpoint_path"],
+                "pyscf_chkfile": calc_scf_config.get("chkfile") if calc_scf_config else None,
                 "frequency_output_path": frequency_output_path,
                 "irc_output_path": context["irc_output_path"],
                 "input_xyz": args.xyz_file,
@@ -2561,6 +2644,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                     calc_eps,
                     verbose,
                     memory_mb,
+                    run_dir=run_dir,
                     optimizer_mode=optimizer_mode,
                     multiplicity=multiplicity,
                 )
