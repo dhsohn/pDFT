@@ -164,6 +164,124 @@ def _build_pyscf_calculator(
     return base_calc
 
 
+def _apply_constraints(atoms, constraints):
+    if not constraints:
+        return
+    if not isinstance(constraints, dict):
+        raise ValueError("Config 'constraints' must be an object.")
+    bonds = constraints.get("bonds") or []
+    angles = constraints.get("angles") or []
+    dihedrals = constraints.get("dihedrals") or []
+    if not bonds and not angles and not dihedrals:
+        return
+
+    from ase.constraints import FixAngle, FixBondLength, FixDihedral, FixInternals
+
+    atom_count = len(atoms)
+
+    def _validate_index(value, path):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError(f"{path} must be an integer.")
+        if value < 0 or value >= atom_count:
+            raise ValueError(
+                f"{path} index {value} is out of range for {atom_count} atoms."
+            )
+
+    def _validate_number(value, path):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"{path} must be a number.")
+
+    bond_entries = []
+    for idx, bond in enumerate(bonds):
+        if not isinstance(bond, dict):
+            raise ValueError(f"constraints.bonds[{idx}] must be an object.")
+        for key in ("i", "j"):
+            if key not in bond:
+                raise ValueError(f"constraints.bonds[{idx}] must define '{key}'.")
+            _validate_index(bond[key], f"constraints.bonds[{idx}].{key}")
+        if "length" not in bond:
+            raise ValueError(f"constraints.bonds[{idx}] must define 'length'.")
+        _validate_number(bond["length"], f"constraints.bonds[{idx}].length")
+        if bond["length"] <= 0:
+            raise ValueError(
+                f"constraints.bonds[{idx}].length must be > 0 (Angstrom)."
+            )
+        bond_entries.append((bond["i"], bond["j"], float(bond["length"])))
+
+    angle_entries = []
+    for idx, angle in enumerate(angles):
+        if not isinstance(angle, dict):
+            raise ValueError(f"constraints.angles[{idx}] must be an object.")
+        for key in ("i", "j", "k"):
+            if key not in angle:
+                raise ValueError(f"constraints.angles[{idx}] must define '{key}'.")
+            _validate_index(angle[key], f"constraints.angles[{idx}].{key}")
+        if "angle" not in angle:
+            raise ValueError(f"constraints.angles[{idx}] must define 'angle'.")
+        _validate_number(angle["angle"], f"constraints.angles[{idx}].angle")
+        if not (0 < angle["angle"] <= 180):
+            raise ValueError(
+                f"constraints.angles[{idx}].angle must be between 0 and 180 degrees."
+            )
+        angle_entries.append(
+            (angle["i"], angle["j"], angle["k"], float(angle["angle"]))
+        )
+
+    dihedral_entries = []
+    for idx, dihedral in enumerate(dihedrals):
+        if not isinstance(dihedral, dict):
+            raise ValueError(f"constraints.dihedrals[{idx}] must be an object.")
+        for key in ("i", "j", "k", "l"):
+            if key not in dihedral:
+                raise ValueError(f"constraints.dihedrals[{idx}] must define '{key}'.")
+            _validate_index(dihedral[key], f"constraints.dihedrals[{idx}].{key}")
+        if "dihedral" not in dihedral:
+            raise ValueError(f"constraints.dihedrals[{idx}] must define 'dihedral'.")
+        _validate_number(dihedral["dihedral"], f"constraints.dihedrals[{idx}].dihedral")
+        if not (-180 <= dihedral["dihedral"] <= 180):
+            raise ValueError(
+                "constraints.dihedrals[{idx}].dihedral must be between -180 and 180 "
+                "degrees.".format(idx=idx)
+            )
+        dihedral_entries.append(
+            (
+                dihedral["i"],
+                dihedral["j"],
+                dihedral["k"],
+                dihedral["l"],
+                float(dihedral["dihedral"]),
+            )
+        )
+
+    if (
+        (len(bond_entries) + len(angle_entries) + len(dihedral_entries)) > 1
+        or (bond_entries and angle_entries)
+        or (bond_entries and dihedral_entries)
+        or (angle_entries and dihedral_entries)
+    ):
+        atoms.set_constraint(
+            FixInternals(
+                bonds=bond_entries or None,
+                angles=angle_entries or None,
+                dihedrals=dihedral_entries or None,
+            )
+        )
+        return
+
+    constraint_objects = []
+    for entry in bond_entries:
+        i, j, length = entry
+        constraint_objects.append(FixBondLength(i, j, length))
+    for entry in angle_entries:
+        i, j, k, angle = entry
+        constraint_objects.append(FixAngle(i, j, k, angle))
+    for entry in dihedral_entries:
+        i, j, k, l, value = entry
+        constraint_objects.append(FixDihedral(i, j, k, l, value))
+    if constraint_objects:
+        atoms.set_constraint(constraint_objects)
+
+
 def _run_ase_optimizer(
     input_xyz,
     output_xyz,
@@ -182,6 +300,7 @@ def _run_ase_optimizer(
     memory_mb,
     optimizer_config,
     optimization_mode,
+    constraints,
     step_callback=None,
 ):
     try:
@@ -212,6 +331,7 @@ def _run_ase_optimizer(
         optimizer_config=optimizer_config,
         optimization_mode=optimization_mode,
     )
+    _apply_constraints(atoms, constraints)
 
     optimizer_name = (optimizer_config.get("optimizer") or "").lower()
     if not optimizer_name:
@@ -302,6 +422,7 @@ def _run_ase_irc(
     memory_mb,
     optimizer_config,
     optimization_mode,
+    constraints,
     mode_vector,
     steps,
     step_size,
@@ -338,6 +459,7 @@ def _run_ase_irc(
         optimizer_config=optimizer_config,
         optimization_mode=optimization_mode,
     )
+    _apply_constraints(atoms, constraints)
     positions = atoms.get_positions()
     mode = np.asarray(mode_vector, dtype=float)
     if mode.shape != positions.shape:

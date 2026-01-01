@@ -335,6 +335,7 @@ def prepare_run_context(args, config: RunConfig, config_raw):
     optimizer_config = config.optimizer
     optimizer_ase_config = optimizer_config.ase if optimizer_config else None
     optimizer_ase_dict = optimizer_ase_config.to_dict() if optimizer_ase_config else {}
+    constraints = config.constraints
     optimizer_mode = None
     if calculation_mode in ("optimization", "irc"):
         optimizer_mode = _normalize_optimizer_mode(
@@ -413,6 +414,7 @@ def prepare_run_context(args, config: RunConfig, config_raw):
         "optimizer_config": optimizer_config,
         "optimizer_ase_dict": optimizer_ase_dict,
         "optimizer_mode": optimizer_mode,
+        "constraints": constraints,
         "solvent_map_path": solvent_map_path,
         "single_point_config": single_point_config,
         "thermo": thermo_config,
@@ -806,6 +808,7 @@ def run_irc_stage(stage_context, queue_update_fn):
             stage_context["memory_mb"],
             stage_context["optimizer_ase_config"],
             stage_context["optimizer_mode"],
+            stage_context["constraints"],
             stage_context["mode_vector"],
             stage_context["irc_steps"],
             stage_context["irc_step_size"],
@@ -1157,6 +1160,7 @@ def run_optimization_stage(
             memory_mb,
             optimizer_ase_dict,
             optimizer_mode,
+            context["constraints"],
             step_callback=_step_callback,
         )
         optimized_atom_spec, _, _, _ = load_xyz(output_xyz_path)
@@ -1432,6 +1436,7 @@ def run_optimization_stage(
                     memory_mb,
                     optimizer_ase_dict,
                     optimizer_mode,
+                    context["constraints"],
                     mode_result["mode"],
                     irc_steps,
                     irc_step_size,
@@ -1965,6 +1970,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 "charge": charge,
                 "spin": spin,
                 "optimizer_ase_config": context["optimizer_ase_dict"],
+                "constraints": context["constraints"],
             }
             if calculation_mode == "single_point":
                 run_single_point_stage(stage_context, _update_foreground_queue)
