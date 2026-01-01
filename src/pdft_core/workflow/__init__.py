@@ -283,7 +283,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
             if calculation_mode == "optimization" or (
                 calculation_mode == "scan" and scan_mode == "optimization"
             ):
-                applied_scf = apply_scf_settings(mf, scf_config)
+                mf, applied_scf = apply_scf_settings(mf, scf_config)
             context["applied_scf"] = applied_scf
 
             sp_basis = (

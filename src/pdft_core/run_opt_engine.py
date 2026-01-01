@@ -167,8 +167,19 @@ def total_electron_count(atom_spec, charge):
 
 def apply_scf_settings(mf, scf_config):
     if not scf_config:
-        return {}
+        return mf, {}
     applied = {}
+    extra = scf_config.get("extra") or {}
+    applied_extra = {}
+    if "density_fit" in extra:
+        density_fit = extra.get("density_fit")
+        if not isinstance(density_fit, bool):
+            raise ValueError("Config 'scf.extra.density_fit' must be a boolean.")
+        if density_fit:
+            if not hasattr(mf, "density_fit"):
+                raise ValueError("Density fitting is not supported for this SCF object.")
+            mf = mf.density_fit()
+        applied_extra["density_fit"] = density_fit
     max_cycle = scf_config.get("max_cycle")
     conv_tol = scf_config.get("conv_tol")
     diis = scf_config.get("diis")
@@ -196,12 +207,44 @@ def apply_scf_settings(mf, scf_config):
     elif diis is True:
         applied["diis"] = True
 
-    return applied
+    if extra:
+        grids = extra.get("grids") or {}
+        if grids:
+            applied_grids = {}
+            if "level" in grids:
+                mf.grids.level = int(grids.get("level"))
+                applied_grids["level"] = mf.grids.level
+            if "prune" in grids:
+                prune_value = grids.get("prune")
+                allowed_prune_types = (bool, str, tuple, list, dict)
+                if not (
+                    prune_value is None
+                    or callable(prune_value)
+                    or isinstance(prune_value, allowed_prune_types)
+                ):
+                    raise ValueError(
+                        "Config 'scf.extra.grids.prune' must be a bool, string, "
+                        "tuple, list, dict, callable, or null."
+                    )
+                mf.grids.prune = prune_value
+                applied_grids["prune"] = prune_value
+            if applied_grids:
+                applied_extra["grids"] = applied_grids
+        if "init_guess" in extra:
+            init_guess = extra.get("init_guess")
+            mf.init_guess = init_guess
+            applied_extra["init_guess"] = init_guess
+    if applied_extra:
+        applied["extra"] = applied_extra
+
+    return mf, applied
 
 
 def apply_scf_checkpoint(mf, scf_config, run_dir=None):
     if not scf_config:
         return None, None
+    extra = scf_config.get("extra") or {}
+    init_guess_setting = extra.get("init_guess") if isinstance(extra, dict) else None
     chkfile_setting = scf_config.get("chkfile")
     if not chkfile_setting:
         return None, None
@@ -216,7 +259,25 @@ def apply_scf_checkpoint(mf, scf_config, run_dir=None):
         except Exception:
             dm0 = None
         if dm0 is None:
-            mf.init_guess = "chkfile"
+            if init_guess_setting is None:
+                mf.init_guess = "chkfile"
+                logging.info(
+                    "SCF chkfile found at %s; using init_guess='chkfile'.",
+                    chkfile_path,
+                )
+            else:
+                logging.info(
+                    "SCF chkfile found at %s; keeping user init_guess=%r.",
+                    chkfile_path,
+                    init_guess_setting,
+                )
+        elif init_guess_setting is not None:
+            logging.info(
+                "SCF chkfile found at %s; using density matrix from chkfile "
+                "(init_guess=%r ignored).",
+                chkfile_path,
+                init_guess_setting,
+            )
         return dm0, chkfile_path
     return None, chkfile_path
 
@@ -413,7 +474,7 @@ def compute_single_point_energy(
         )
     if verbose:
         mf_sp.verbose = 4
-    apply_scf_settings(mf_sp, scf_config)
+    mf_sp, _ = apply_scf_settings(mf_sp, scf_config)
     dm0, _ = apply_scf_checkpoint(mf_sp, scf_config, run_dir=run_dir)
     if dm0 is not None:
         energy = mf_sp.kernel(dm0=dm0)
@@ -501,7 +562,7 @@ def compute_frequencies(
         )
     if verbose:
         mf_freq.verbose = 4
-    apply_scf_settings(mf_freq, scf_config)
+    mf_freq, _ = apply_scf_settings(mf_freq, scf_config)
     dm0, _ = apply_scf_checkpoint(mf_freq, scf_config, run_dir=run_dir)
     if dm0 is not None:
         energy = mf_freq.kernel(dm0=dm0)
@@ -721,7 +782,7 @@ def compute_imaginary_mode(
         )
     if verbose:
         mf_mode.verbose = 4
-    apply_scf_settings(mf_mode, scf_config)
+    mf_mode, _ = apply_scf_settings(mf_mode, scf_config)
     dm0, _ = apply_scf_checkpoint(mf_mode, scf_config, run_dir=run_dir)
     if dm0 is not None:
         mf_mode.kernel(dm0=dm0)
@@ -806,7 +867,7 @@ def run_capability_check(
     scf_override = dict(scf_config or {})
     current_max = scf_override.get("max_cycle", max_scf_cycles)
     scf_override["max_cycle"] = min(current_max, max_scf_cycles)
-    apply_scf_settings(mf_check, scf_override)
+    mf_check, _ = apply_scf_settings(mf_check, scf_override)
     try:
         mf_check.kernel()
     except Exception as exc:

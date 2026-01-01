@@ -1,6 +1,7 @@
 import shutil
 
 from .run_opt_engine import (
+    apply_scf_checkpoint,
     apply_scf_settings,
     apply_solvent_model,
     normalize_xc_functional,
@@ -40,13 +41,11 @@ def _build_pyscf_calculator(
     optimizer_config,
     optimization_mode,
 ):
-    import os
     import numpy as np
 
     from ase import units
     from ase.calculators.calculator import Calculator, all_changes
     from pyscf import dft, gto
-    from pyscf.scf import chkfile as scf_chkfile
 
     xc = normalize_xc_functional(xc)
     d3_params = optimizer_config.get("d3_params") or optimizer_config.get("dftd3_params")
@@ -107,20 +106,8 @@ def _build_pyscf_calculator(
             mf.xc = xc
             if solvent_model:
                 mf = apply_solvent_model(mf, solvent_model, solvent_name, solvent_eps)
-            apply_scf_settings(mf, scf_config)
-            dm0 = None
-            chkfile_path = None
-            if scf_config and scf_config.get("chkfile"):
-                chkfile_path = resolve_run_path(run_dir, scf_config.get("chkfile"))
-                ensure_parent_dir(chkfile_path)
-                mf.chkfile = chkfile_path
-                if chkfile_path and os.path.exists(chkfile_path):
-                    try:
-                        dm0 = scf_chkfile.load(chkfile_path, "scf/dm")
-                    except Exception:
-                        dm0 = None
-                    if dm0 is None:
-                        mf.init_guess = "chkfile"
+            mf, _ = apply_scf_settings(mf, scf_config)
+            dm0, chkfile_path = apply_scf_checkpoint(mf, scf_config, run_dir=run_dir)
             if verbose:
                 mf.verbose = 4
             if dm0 is not None:
