@@ -94,7 +94,7 @@ python run_opt.py input.xyz \
 
 ### 6) 백그라운드 큐 & 상태/진단 유틸리티
 - `--background`로 큐에 넣어 **백그라운드 실행** 가능 (우선순위/타임아웃 지원)
-- `pdft queue status/cancel/retry` 등으로 **큐 상태 관리**
+- `pdft queue status/cancel/retry/prune` 등으로 **큐 상태 관리**
 - `pdft status <run_dir>` 및 `--recent`로 **실행 결과 요약 출력**
 - `pdft doctor`, `pdft validate-config`로 **환경 진단/설정 검증**
 
@@ -301,6 +301,7 @@ pdft queue status
 pdft queue cancel <RUN_ID>
 pdft queue retry <RUN_ID>
 pdft queue requeue-failed
+pdft queue prune --keep-days 30
 ```
 
 큐 파일은 `runs/queue.json`에 저장되며, 큐 러너 로그는 `log/queue_runner.log`에 기록됩니다.
@@ -349,6 +350,7 @@ pdft validate-config run_config.json
 - `pdft queue cancel <RUN_ID>`: 대기열 항목 취소.
 - `pdft queue retry <RUN_ID>`: 실패/타임아웃 항목 재시도.
 - `pdft queue requeue-failed`: 실패/타임아웃 항목 일괄 재등록.
+- `pdft queue prune --keep-days <N>`: 완료/실패/타임아웃/취소 항목 중 오래된 항목 정리.
 - `--queue-priority <int>`: 우선순위(높을수록 먼저 실행).
 - `--queue-max-runtime <sec>`: 최대 실행 시간(초).
 

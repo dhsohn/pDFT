@@ -281,6 +281,15 @@ def build_parser():
     queue_subparsers.add_parser(
         "requeue-failed", help="Re-queue all failed/timeout runs."
     )
+    queue_prune_parser = queue_subparsers.add_parser(
+        "prune", help="Remove old completed/failed queue entries."
+    )
+    queue_prune_parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=30,
+        help="Keep queue entries newer than N days (default: 30).",
+    )
     return parser
 
 

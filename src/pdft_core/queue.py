@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .run_opt_config import (
     DEFAULT_QUEUE_LOCK_PATH,
@@ -516,6 +516,45 @@ def _format_queue_status(queue_state):
             print(f"        max_runtime_seconds={max_runtime_seconds}")
 
 
+def _select_queue_entry_timestamp(entry):
+    for key in ("ended_at", "queued_at", "started_at"):
+        timestamp = _parse_iso_timestamp(entry.get(key))
+        if timestamp:
+            return timestamp
+    return None
+
+
+def _prune_queue_entries(queue_path, lock_path, keep_days, statuses):
+    if keep_days is None:
+        keep_days = 0
+    if keep_days < 0:
+        raise ValueError("keep_days must be a non-negative integer.")
+    if not statuses:
+        return 0, 0
+    keep_days = int(keep_days)
+    cutoff = datetime.now() - timedelta(days=keep_days)
+    _ensure_queue_file(queue_path)
+    removed_count = 0
+    remaining_count = 0
+    with _queue_lock(lock_path):
+        queue_state = _load_queue(queue_path)
+        entries = queue_state.get("entries") or []
+        remaining_entries = []
+        for entry in entries:
+            status = entry.get("status")
+            if status in statuses:
+                timestamp = _select_queue_entry_timestamp(entry)
+                if timestamp and timestamp < cutoff:
+                    removed_count += 1
+                    continue
+            remaining_entries.append(entry)
+        if removed_count:
+            queue_state["entries"] = remaining_entries
+            _write_queue(queue_path, queue_state)
+        remaining_count = len(remaining_entries) if removed_count else len(entries)
+    return removed_count, remaining_count
+
+
 def _run_queue_worker(script_path, queue_path, lock_path, runner_lock_path):
     ensure_parent_dir(queue_path)
     try:
@@ -830,6 +869,10 @@ def requeue_failed_entries(queue_path, lock_path):
     return _requeue_failed_entries(queue_path, lock_path)
 
 
+def prune_queue_entries(queue_path, lock_path, keep_days, statuses):
+    return _prune_queue_entries(queue_path, lock_path, keep_days, statuses)
+
+
 def format_queue_status(queue_state):
     return _format_queue_status(queue_state)
 
@@ -880,6 +923,7 @@ __all__ = [
     "load_run_metadata",
     "print_recent_statuses",
     "print_status",
+    "prune_queue_entries",
     "queue_lock",
     "record_status_event",
     "register_foreground_run",
