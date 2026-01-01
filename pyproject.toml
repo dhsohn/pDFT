@@ -17,7 +17,7 @@ dev = ["pytest", "ruff"]
 pdft = "core.run_opt:main"
 
 [tool.setuptools]
-packages = ["core", "pdft"]
+packages = ["core"]
 
 [tool.ruff.lint]
 select = ["E", "F", "B"]
