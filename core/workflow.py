@@ -1964,7 +1964,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 "input_xyz": args.xyz_file,
                 "charge": charge,
                 "spin": spin,
-                "optimizer_ase_config": optimizer_ase_dict,
+                "optimizer_ase_config": context["optimizer_ase_dict"],
             }
             if calculation_mode == "single_point":
                 run_single_point_stage(stage_context, _update_foreground_queue)
