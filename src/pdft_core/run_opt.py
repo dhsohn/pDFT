@@ -198,6 +198,17 @@ def main():
                 )
                 print(f"Re-queued failed runs: {count}")
                 return
+            if args.queue_command == "prune":
+                queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
+                queue.load_queue(DEFAULT_QUEUE_PATH)
+                removed, remaining = queue.prune_queue_entries(
+                    DEFAULT_QUEUE_PATH,
+                    DEFAULT_QUEUE_LOCK_PATH,
+                    args.keep_days,
+                    {"completed", "failed", "timeout", "canceled"},
+                )
+                print(f"Pruned queue entries: {removed} removed, {remaining} remaining.")
+                return
 
         if args.command == "status":
             if args.recent and args.run_path:
