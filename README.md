@@ -2,7 +2,7 @@
 
 PySCF(DFT/SCF/gradient/Hessian)와 ASE(최적화 드라이버)를 결합해 **구조 최적화(최소점/전이상태), 단일점(SP) 에너지, 프리퀀시(진동수) 분석**을 한 번에 실행하는 경량 워크플로우 스크립트입니다.
 
-- 엔트리포인트: `run_opt.py` (내부 모듈은 `pdft_core/` 패키지)
+- 엔트리포인트: `pdft` CLI (내부 구현은 `run_opt.py`, 모듈은 `pdft_core/` 패키지)
 - 기본 설정 템플릿: `run_config.json`
 - 출력은 실행 시점별로 `runs/YYYY-MM-DD_HHMMSS/` 아래에 자동으로 정리됩니다.
 
@@ -23,10 +23,10 @@ PySCF(DFT/SCF/gradient/Hessian)와 ASE(최적화 드라이버)를 결합해 **�
 6. **결과 정리/기록**: `pdft_core/run_opt_logging.py`와 `pdft_core/run_opt_metadata.py`가 실행 로그, 이벤트 로그, 설정 스냅샷, 결과 파일을 표준 디렉토리 구조로 정리합니다.
 
 ### 핵심 설계 포인트
-- **단일 엔트리포인트**: `run_opt.py` 하나로 인터랙티브/비-인터랙티브, 큐 실행까지 지원합니다. (내부 구현은 `pdft_core/` 패키지)
+- **단일 엔트리포인트**: `pdft` 하나로 `run/doctor/validate-config/status/queue` 서브커맨드를 제공하며, 인터랙티브/비-인터랙티브 및 큐 실행까지 지원합니다. (내부 구현은 `pdft_core/` 패키지)
 - **계산/설정 분리**: JSON 설정 템플릿을 통해 계산 조건을 재현 가능하게 유지합니다.
 - **분산/용매 모듈화**: 분산 보정(D3/D4)과 용매 모델(PCM/SMD)을 필요 시 활성화하는 구조입니다.
-- **진단/상태 유틸리티**: `--doctor`, `--status` 등으로 환경과 실행 상태를 빠르게 점검할 수 있습니다.
+- **진단/상태 유틸리티**: `pdft doctor`, `pdft status`, `pdft queue` 등으로 환경과 실행 상태를 빠르게 점검할 수 있습니다.
 
 ### 결과물 구성(한 번의 실행 기준)
 - **실행 로그**: `run.log`, `log/run_events.jsonl`
@@ -94,9 +94,9 @@ python run_opt.py input.xyz \
 
 ### 6) 백그라운드 큐 & 상태/진단 유틸리티
 - `--background`로 큐에 넣어 **백그라운드 실행** 가능 (우선순위/타임아웃 지원)
-- `--queue-status`, `--queue-cancel`, `--queue-retry` 등으로 **큐 상태 관리**
-- `--status`, `--status-recent`로 **실행 결과 요약 출력**
-- `--doctor`, `--validate-only`로 **환경 진단/설정 검증**
+- `pdft queue status/cancel/retry` 등으로 **큐 상태 관리**
+- `pdft status <run_dir>` 및 `--recent`로 **실행 결과 요약 출력**
+- `pdft doctor`, `pdft validate-config`로 **환경 진단/설정 검증**
 
 ---
 
@@ -272,14 +272,14 @@ python run_opt.py --resume runs/2024-01-01_120000 --force-resume
 }
 ```
 
-유용한 옵션:
+유용한 옵션/명령:
 - `--run-dir <dir>`: 출력 폴더를 직접 지정
 - `--run-id <uuid>`: run id를 고정
 - `--solvent-map <json>`: solvent dielectric map 경로 지정
-- `--validate-only`: config 검증만 수행하고 종료
-- `--status <run_dir|metadata.json>`: 특정 실행의 상태 요약 출력
-- `--status-recent <N>`: 최근 N개 실행 요약 출력
-- `--doctor`: 환경 진단(의존성/solvent map 등) 후 종료
+- `pdft validate-config [config.json]`: config 검증만 수행하고 종료
+- `pdft status <run_dir|metadata.json>`: 특정 실행의 상태 요약 출력
+- `pdft status --recent <N>`: 최근 N개 실행 요약 출력
+- `pdft doctor`: 환경 진단(의존성/solvent map 등) 후 종료
 - `--scan-dimension`, `--scan-grid`, `--scan-mode`: 스캔 계산 전용 옵션
 
 ---
@@ -297,10 +297,10 @@ python run_opt.py input.xyz --config run_config.json --non-interactive --backgro
 
 ### 2) 큐 상태 확인/관리
 ```bash
-python run_opt.py --queue-status
-python run_opt.py --queue-cancel <RUN_ID>
-python run_opt.py --queue-retry <RUN_ID>
-python run_opt.py --queue-requeue-failed
+pdft queue status
+pdft queue cancel <RUN_ID>
+pdft queue retry <RUN_ID>
+pdft queue requeue-failed
 ```
 
 큐 파일은 `runs/queue.json`에 저장되며, 큐 러너 로그는 `log/queue_runner.log`에 기록됩니다.
@@ -311,14 +311,15 @@ python run_opt.py --queue-requeue-failed
 
 ### 환경 진단
 ```bash
-python run_opt.py --doctor
+pdft doctor
 ```
 
 ### 설정 검증(단축 명령 지원)
 ```bash
-python run_opt.py --validate-only --config run_config.json
-python run_opt.py validate-config run_config.json
+pdft validate-config run_config.json
 ```
+
+> 하위 호환 플래그/alias: 기존 `--doctor`, `--validate-only`, `--status*`, `--queue-*` 플래그는 **하위 호환(alias)** 으로 유지되며, 신규 서브커맨드 사용을 기본으로 권장합니다.
 
 ---
 
@@ -337,17 +338,17 @@ python run_opt.py validate-config run_config.json
 - `--force-resume`: 완료/실패/타임아웃 run도 재개 허용합니다.
 
 ### 상태/진단
-- `--status <run_dir|metadata.json>`: 특정 실행 요약 출력.
-- `--status-recent <N>`: 최근 N개 실행 요약 출력.
-- `--doctor`: 의존성/환경 점검(설치 누락, solvent map 등).
-- `--validate-only`: 설정 파일만 검증하고 종료합니다.
+- `pdft status <run_dir|metadata.json>`: 특정 실행 요약 출력.
+- `pdft status --recent <N>`: 최근 N개 실행 요약 출력.
+- `pdft doctor`: 의존성/환경 점검(설치 누락, solvent map 등).
+- `pdft validate-config [config.json]`: 설정 파일만 검증하고 종료합니다.
 
 ### 백그라운드 큐
 - `--background`: 큐에 등록해 백그라운드 실행.
-- `--queue-status`: 큐/실행 상태를 요약 출력.
-- `--queue-cancel <RUN_ID>`: 대기열 항목 취소.
-- `--queue-retry <RUN_ID>`: 실패/타임아웃 항목 재시도.
-- `--queue-requeue-failed`: 실패/타임아웃 항목 일괄 재등록.
+- `pdft queue status`: 큐/실행 상태를 요약 출력.
+- `pdft queue cancel <RUN_ID>`: 대기열 항목 취소.
+- `pdft queue retry <RUN_ID>`: 실패/타임아웃 항목 재시도.
+- `pdft queue requeue-failed`: 실패/타임아웃 항목 일괄 재등록.
 - `--queue-priority <int>`: 우선순위(높을수록 먼저 실행).
 - `--queue-max-runtime <sec>`: 최대 실행 시간(초).
 
@@ -368,7 +369,7 @@ python run_opt.py validate-config run_config.json
 
 실행:
 ```bash
-python run_opt.py --validate-only --config run_config.json
+pdft validate-config run_config.json
 ```
 
 필요한 파일:
