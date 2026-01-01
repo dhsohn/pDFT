@@ -124,6 +124,32 @@ def _prompt_interactive_config(args):
         ase_config.setdefault("logfile", "ts_opt.log")
         ase_config.setdefault("sella", {"order": 1})
 
+    constraints_default = config.get("constraints")
+    if constraints_default:
+        constraints_hint = json.dumps(constraints_default, ensure_ascii=False)
+    else:
+        constraints_hint = ""
+    constraints_prompt = (
+        "constraints를 JSON으로 입력하세요 (예: "
+        "{\"bonds\":[{\"i\":0,\"j\":1,\"length\":1.10}]})"
+    )
+    if constraints_hint:
+        constraints_prompt += f" [기본값: {constraints_hint}]"
+    constraints_input = input(f"{constraints_prompt}\n> ").strip()
+    if not constraints_input and constraints_default is not None:
+        constraints = constraints_default
+    elif not constraints_input:
+        constraints = None
+    elif constraints_input.lower() in ("none", "null", "없음", "no"):
+        constraints = None
+    else:
+        try:
+            constraints = json.loads(constraints_input)
+        except json.JSONDecodeError as exc:
+            raise ValueError("constraints 입력이 올바른 JSON이 아닙니다.") from exc
+        if not isinstance(constraints, dict):
+            raise ValueError("constraints 입력은 JSON 객체여야 합니다.")
+
     if not args.xyz_file:
         input_dir = _resolve_interactive_input_dir()
         if input_dir is None:
@@ -259,6 +285,10 @@ def _prompt_interactive_config(args):
     config["single_point_enabled"] = single_point_enabled
     if single_point_config:
         config["single_point"] = single_point_config
+    if constraints is None:
+        config.pop("constraints", None)
+    else:
+        config["constraints"] = constraints
     config_raw = json.dumps(config, indent=2, ensure_ascii=False)
     args.config = "<interactive>"
     return config, config_raw, base_config_path

@@ -66,6 +66,65 @@ RUN_CONFIG_SCHEMA = {
                 "unit": {"type": "string", "enum": ["atm", "bar", "Pa"]},
             },
         },
+        "constraints": {
+            "type": ["object", "null"],
+            "properties": {
+                "bonds": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["i", "j", "length"],
+                        "properties": {
+                            "i": {"type": "integer", "minimum": 0},
+                            "j": {"type": "integer", "minimum": 0},
+                            "length": {
+                                "type": ["number", "integer"],
+                                "exclusiveMinimum": 0,
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+                "angles": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["i", "j", "k", "angle"],
+                        "properties": {
+                            "i": {"type": "integer", "minimum": 0},
+                            "j": {"type": "integer", "minimum": 0},
+                            "k": {"type": "integer", "minimum": 0},
+                            "angle": {
+                                "type": ["number", "integer"],
+                                "minimum": 0,
+                                "maximum": 180,
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+                "dihedrals": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["i", "j", "k", "l", "dihedral"],
+                        "properties": {
+                            "i": {"type": "integer", "minimum": 0},
+                            "j": {"type": "integer", "minimum": 0},
+                            "k": {"type": "integer", "minimum": 0},
+                            "l": {"type": "integer", "minimum": 0},
+                            "dihedral": {
+                                "type": ["number", "integer"],
+                                "minimum": -180,
+                                "maximum": 180,
+                            },
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "additionalProperties": False,
+        },
     },
     "additionalProperties": True,
 }
@@ -82,6 +141,11 @@ RUN_CONFIG_EXAMPLES = {
     "irc_enabled": "\"irc_enabled\": true",
     "irc": "\"irc\": {\"steps\": 10, \"step_size\": 0.05, \"force_threshold\": 0.01}",
     "thermo": "\"thermo\": {\"T\": 298.15, \"P\": 1.0, \"unit\": \"atm\"}",
+    "constraints": (
+        "\"constraints\": {\"bonds\": [{\"i\": 0, \"j\": 1, \"length\": 1.10}], "
+        "\"angles\": [{\"i\": 0, \"j\": 1, \"k\": 2, \"angle\": 120.0}], "
+        "\"dihedrals\": [{\"i\": 0, \"j\": 1, \"k\": 2, \"l\": 3, \"dihedral\": 180.0}]}"
+    ),
 }
 
 
@@ -316,6 +380,7 @@ class RunConfig:
     frequency: FrequencyConfig | None = None
     irc: IrcConfig | None = None
     thermo: ThermoConfig | None = None
+    constraints: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "RunConfig":
@@ -352,6 +417,7 @@ class RunConfig:
             frequency=FrequencyConfig.from_dict(frequency_block),
             irc=IrcConfig.from_dict(data.get("irc")),
             thermo=ThermoConfig.from_dict(data.get("thermo")),
+            constraints=data.get("constraints"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -748,6 +814,85 @@ def validate_run_config(config):
             raise ValueError(
                 "Config 'thermo.unit' must be one of: atm, bar, Pa. "
                 "Example: \"thermo\": {\"T\": 298.15, \"P\": 1.0, \"unit\": \"atm\"}."
+            )
+    if "constraints" in config and config["constraints"] is not None:
+        if not isinstance(config["constraints"], dict):
+            raise ValueError("Config 'constraints' must be an object.")
+        constraints = config["constraints"]
+
+        def _validate_constraint_list(list_name, items, index_keys, value_key, value_label):
+            if not isinstance(items, list):
+                raise ValueError(
+                    "Config 'constraints.{name}' must be a list.".format(name=list_name)
+                )
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "Config 'constraints.{name}[{idx}]' must be an object.".format(
+                            name=list_name, idx=idx
+                        )
+                    )
+                for key in index_keys:
+                    if key not in item:
+                        raise ValueError(
+                            "Config 'constraints.{name}[{idx}]' must define '{key}'.".format(
+                                name=list_name, idx=idx, key=key
+                            )
+                        )
+                    if not is_int(item[key]):
+                        raise ValueError(
+                            "Config 'constraints.{name}[{idx}].{key}' must be an integer.".format(
+                                name=list_name, idx=idx, key=key
+                            )
+                        )
+                    if item[key] < 0:
+                        raise ValueError(
+                            "Config 'constraints.{name}[{idx}].{key}' must be >= 0.".format(
+                                name=list_name, idx=idx, key=key
+                            )
+                        )
+                if value_key not in item:
+                    raise ValueError(
+                        "Config 'constraints.{name}[{idx}]' must define '{key}'.".format(
+                            name=list_name, idx=idx, key=value_key
+                        )
+                    )
+                value = item[value_key]
+                if not is_number(value):
+                    raise ValueError(
+                        "Config 'constraints.{name}[{idx}].{key}' must be a number.".format(
+                            name=list_name, idx=idx, key=value_key
+                        )
+                    )
+                if value_label == "length" and value <= 0:
+                    raise ValueError(
+                        "Config 'constraints.{name}[{idx}].{key}' must be > 0 (Angstrom).".format(
+                            name=list_name, idx=idx, key=value_key
+                        )
+                    )
+                if value_label == "angle" and not (0 < value <= 180):
+                    raise ValueError(
+                        "Config 'constraints.{name}[{idx}].{key}' must be between 0 and 180 degrees.".format(
+                            name=list_name, idx=idx, key=value_key
+                        )
+                    )
+                if value_label == "dihedral" and not (-180 <= value <= 180):
+                    raise ValueError(
+                        "Config 'constraints.{name}[{idx}].{key}' must be between -180 and 180 degrees.".format(
+                            name=list_name, idx=idx, key=value_key
+                        )
+                    )
+
+        bonds = constraints.get("bonds")
+        if bonds is not None:
+            _validate_constraint_list("bonds", bonds, ("i", "j"), "length", "length")
+        angles = constraints.get("angles")
+        if angles is not None:
+            _validate_constraint_list("angles", angles, ("i", "j", "k"), "angle", "angle")
+        dihedrals = constraints.get("dihedrals")
+        if dihedrals is not None:
+            _validate_constraint_list(
+                "dihedrals", dihedrals, ("i", "j", "k", "l"), "dihedral", "dihedral"
             )
 
 
