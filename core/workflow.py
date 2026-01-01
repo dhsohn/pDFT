@@ -477,10 +477,11 @@ def run_doctor():
             failures.append(label)
         print(format_doctor_result(label, ok, remedy))
 
-    def _check_import(module_name, hint):
+    def _check_import(module_name, hint, label=None):
         spec = importlib.util.find_spec(module_name)
         ok = spec is not None
-        _record_check(module_name, ok, hint if not ok else None)
+        display_label = label or module_name
+        _record_check(display_label, ok, hint if not ok else None)
         return ok
 
     def _solvent_map_hint(error):
@@ -500,15 +501,18 @@ def run_doctor():
         _record_check("solvent_map", False, _solvent_map_hint(exc))
 
     checks = [
+        ("ase", "Install with: pip install ase"),
+        ("ase.io", "Install with: pip install ase"),
         ("pyscf", "Install with: pip install pyscf"),
         ("pyscf.dft", "Install with: pip install pyscf"),
         ("pyscf.gto", "Install with: pip install pyscf"),
         ("pyscf.hessian.thermo", "Install with: pip install pyscf"),
         ("dftd3", "Install with: pip install dftd3"),
         ("dftd4", "Install with: pip install dftd4"),
+        ("sella", "Install with: pip install sella", "sella (TS optimizer)"),
     ]
-    for module_name, hint in checks:
-        _check_import(module_name, hint)
+    for module_name, hint, *label in checks:
+        _check_import(module_name, hint, label[0] if label else None)
 
     if failures:
         print(f"FAIL {len(failures)} checks failed: {', '.join(failures)}")
