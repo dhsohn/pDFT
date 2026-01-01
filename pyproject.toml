@@ -19,6 +19,9 @@ pdft = "core.run_opt:main"
 [tool.setuptools]
 packages = ["core"]
 
+[tool.setuptools.package-data]
+core = ["solvent_dielectric.json"]
+
 [tool.ruff.lint]
 select = ["E", "F", "B"]
 ignore = ["E501"]

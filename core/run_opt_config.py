@@ -1,6 +1,8 @@
 import json
 import os
 import re
+from importlib import resources
+from importlib.resources.abc import Traversable
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -529,11 +531,60 @@ def load_run_config(config_path):
 def load_solvent_map(map_path):
     if not map_path:
         return {}
-    with open(map_path, "r", encoding="utf-8") as map_file:
+    resolved = resolve_solvent_map_path(map_path)
+    if resolved is None:
+        raise FileNotFoundError(f"Solvent map file not found: '{map_path}'.")
+    return _load_solvent_map_from_resolved(resolved)
+
+
+def resolve_solvent_map_path(map_path):
+    if not map_path:
+        return None
+    if os.path.isfile(map_path):
+        return map_path
+    resource = resolve_solvent_map_resource()
+    if resource and os.path.basename(str(map_path)) == DEFAULT_SOLVENT_MAP_PATH:
+        return resource
+    return map_path
+
+
+def resolve_solvent_map_resource():
+    try:
+        resource = resources.files(__package__).joinpath(DEFAULT_SOLVENT_MAP_PATH)
+    except (ModuleNotFoundError, AttributeError):
+        return None
+    if resource.is_file():
+        return resource
+    return None
+
+
+def load_solvent_map_from_path(map_path):
+    if not map_path:
+        return {}
+    if not os.path.isfile(map_path):
+        raise FileNotFoundError(f"Solvent map file not found: '{map_path}'.")
+    return _load_solvent_map_from_resolved(map_path)
+
+
+def load_solvent_map_from_resource():
+    resource = resolve_solvent_map_resource()
+    if resource is None:
+        raise FileNotFoundError("Solvent map package resource not found.")
+    return _load_solvent_map_from_resolved(resource)
+
+
+def _load_solvent_map_from_resolved(resolved):
+    with _open_solvent_map(resolved) as map_file:
         try:
             return json.load(map_file)
         except json.JSONDecodeError as error:
-            raise ValueError(_format_json_decode_error(map_path, error)) from error
+            raise ValueError(_format_json_decode_error(str(resolved), error)) from error
+
+
+def _open_solvent_map(resolved):
+    if isinstance(resolved, Traversable):
+        return resolved.open("r", encoding="utf-8")
+    return open(resolved, "r", encoding="utf-8")
 
 
 def _format_json_decode_error(path, error):
