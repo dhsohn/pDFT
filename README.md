@@ -158,31 +158,13 @@ conda-lock install --name dftflow conda-lock.yml
 pip install -e .
 ```
 
-#### 3) Build PySCF from source
-```shell
-git clone https://github.com/pyscf/pyscf.git
-```
-```shell
-cd pyscf
-```
-```shell
-mkdir -p build
-cmake -S pyscf/lib -B build \
-  -DENABLE_SMD=ON \
-  -DCMAKE_PREFIX_PATH="$CONDA_PREFIX"
-cmake --build build -j4
-```
-```shell
-python -m pip install -e . --no-build-isolation
-```
-
 ## How to run
 
 ### 1) Interactive mode (default, recommended)
 Run from repo root:
 
 ```
-python run_opt.py
+dftflow run
 ```
 
 Flow:
@@ -251,7 +233,7 @@ Goal: quick check that the default template loads and passes schema validation.
 Run:
 
 ```
-python run_opt.py --validate-config
+dftflow --validate-config
 ```
 
 Required files:
