@@ -166,12 +166,23 @@ def apply_scf_settings(mf, scf_config):
     applied_extra = {}
     if "density_fit" in extra:
         density_fit = extra.get("density_fit")
-        if not isinstance(density_fit, bool):
-            raise ValueError("Config 'scf.extra.density_fit' must be a boolean.")
-        if density_fit:
+        if isinstance(density_fit, bool):
+            if density_fit:
+                if not hasattr(mf, "density_fit"):
+                    raise ValueError("Density fitting is not supported for this SCF object.")
+                mf = mf.density_fit()
+        elif isinstance(density_fit, str):
+            if not density_fit.strip():
+                raise ValueError(
+                    "Config 'scf.extra.density_fit' must be a boolean or non-empty string."
+                )
             if not hasattr(mf, "density_fit"):
                 raise ValueError("Density fitting is not supported for this SCF object.")
-            mf = mf.density_fit()
+            mf = mf.density_fit(auxbasis=density_fit)
+        else:
+            raise ValueError(
+                "Config 'scf.extra.density_fit' must be a boolean or a string."
+            )
         applied_extra["density_fit"] = density_fit
     max_cycle = scf_config.get("max_cycle")
     conv_tol = scf_config.get("conv_tol")
