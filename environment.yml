@@ -27,4 +27,3 @@ dependencies:
   - dftd4
   - pytest
   - jsonschema
-  - basis-set-exchange
