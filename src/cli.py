@@ -145,16 +145,10 @@ def build_parser():
         ),
     )
     run_parser.add_argument(
-        "--interactive",
-        action="store_true",
-        default=None,
-        help="Prompt for run settings interactively (default).",
-    )
-    run_parser.add_argument(
         "--non-interactive",
         "--advanced",
         action="store_true",
-        help="Run with explicit inputs/configs without prompts (advanced).",
+        help="Deprecated (interactive mode removed).",
     )
     run_parser.add_argument(
         "--background",

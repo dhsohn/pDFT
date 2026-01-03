@@ -256,7 +256,6 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 calculation_label,
                 solvent_name,
                 solvent_model,
-                interactive=args.interactive,
             )
             context["solvent_name"] = solvent_name
             context["solvent_model"] = solvent_model
@@ -365,7 +364,6 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 "Single-point",
                 sp_solvent_name,
                 sp_solvent_model,
-                interactive=args.interactive,
             )
             if sp_solvent_name:
                 sp_solvent_key = sp_solvent_name.lower()

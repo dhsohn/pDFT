@@ -27,6 +27,7 @@ requirements:
     - numpy
     - pyscf
     - pyyaml >=6.0
+    - pyside6
     - scipy
 
 test:

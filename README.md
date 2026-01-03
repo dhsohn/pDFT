@@ -4,12 +4,12 @@ DFTFlow is a lightweight workflow wrapper around PySCF (SCF/DFT/gradients/Hessia
 
 - CLI entry point: `dftflow` (implementation in `run_opt.py`, core logic under `src/`)
 - Default config template: `run_config.json`
-- Outputs are organized under `runs/YYYY-MM-DD_HHMMSS/`
+- Outputs are organized under `~/DFTFlow/runs/YYYY-MM-DD_HHMMSS/`
 
 ## Highlights
 
 - **Reproducible runs**: config, environment, and git metadata captured per run.
-- **Interactive and non-interactive modes**: use prompts or explicit configs.
+- **Desktop GUI + CLI backend**: GUI for submit/monitor/view, CLI for automation.
 - **Chained workflows**: optimization → frequency → single-point in one execution.
 - **Solvent + dispersion support**: PCM/SMD, D3/D4 with guardrails.
 - **Queue and status tooling**: background runs and quick status views.
@@ -99,6 +99,12 @@ conda create -n dftflow -c daehyupsohn -c conda-forge dftflow
 This installs DFTFlow plus required runtime dependencies (including Sella and basis-set-exchange).
 Keep `daehyupsohn` first so the SMD-enabled PySCF build is preferred.
 
+Launch the desktop app:
+
+```bash
+dftflow-gui
+```
+
 ### Development install (optional)
 
 ```bash
@@ -158,22 +164,22 @@ Note: `linux-64` and `osx-64` builds must be done on those platforms.
 
 ## Usage
 
-### Interactive run (default)
+### Desktop GUI (default)
 
 ```bash
-dftflow run
+dftflow-gui
 ```
 
-### Non-interactive run
+### CLI run
 
 ```bash
-dftflow run --non-interactive path/to/input.xyz --config run_config.json
+dftflow run path/to/input.xyz --config run_config.json
 ```
 
 ### Resume a run
 
 ```bash
-dftflow run --resume runs/2026-01-03_100104/0147_optimization_...
+dftflow run --resume ~/DFTFlow/runs/2026-01-03_100104/0147_optimization_...
 ```
 
 ### Status and diagnostics
@@ -214,10 +220,12 @@ src/
   run_opt_config.py
   run_opt_logging.py
   run_opt_metadata.py
+  run_opt_paths.py
   run_opt_resources.py
+  gui_app.py
 packaging/
   pyscf-smd/
 run_config.json
 solvent_dielectric.json
-runs/
+~/DFTFlow/runs/
 ```

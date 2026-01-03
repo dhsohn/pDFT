@@ -15,7 +15,6 @@ from datetime import datetime
 from pathlib import Path
 
 import cli
-import interactive
 import run_queue
 import workflow
 from run_opt_config import (
@@ -42,6 +41,24 @@ H     -1.0147968531    2.4412472248   -2.0058431625
 SMOKE_TEST_MODES = ("single_point", "optimization", "frequency", "irc", "scan")
 SMOKE_TEST_SOLVENT_MODELS = (None, "pcm", "smd")
 SMOKE_TEST_DISPERSION_MODELS = (None, "d3bj", "d3zero", "d4")
+DEFAULT_BASIS_SET_OPTIONS = [
+    "6-31g",
+    "6-31g*",
+    "6-31g**",
+    "def2-svp",
+    "def2-tzvp",
+    "def2-tzvpp",
+    "cc-pvdz",
+    "cc-pvtz",
+]
+DEFAULT_XC_FUNCTIONAL_OPTIONS = [
+    "b3lyp",
+    "pbe0",
+    "WB97X_D",
+    "m06-2x",
+    "pbe",
+    "b97-d",
+]
 
 
 def _build_smoke_test_config(base_config, mode, overrides):
@@ -155,11 +172,11 @@ def _prepare_smoke_test_suite(args):
     config_path = Path(args.config).expanduser().resolve()
     base_config, _base_raw = load_run_config(config_path)
     basis_options = _unique_values(
-        [*interactive.BASIS_SET_OPTIONS, base_config.get("basis")]
+        [*DEFAULT_BASIS_SET_OPTIONS, base_config.get("basis")]
     )
     basis_options = [basis for basis in basis_options if basis]
     xc_options = _unique_values(
-        [*interactive.XC_FUNCTIONAL_OPTIONS, base_config.get("xc")]
+        [*DEFAULT_XC_FUNCTIONAL_OPTIONS, base_config.get("xc")]
     )
     xc_options = [xc for xc in xc_options if xc]
     try:
@@ -831,8 +848,6 @@ def main():
             )
             return
 
-        if args.interactive and args.non_interactive:
-            raise ValueError("--interactive and --non-interactive cannot be used together.")
         if args.resume and args.run_dir:
             raise ValueError("--resume and --run-dir cannot be used together.")
         if args.resume and args.scan_dimension:
@@ -843,12 +858,7 @@ def main():
             raise ValueError("--scan-mode cannot be used with --resume.")
         if args.resume and args.xyz_file:
             raise ValueError("xyz_file cannot be provided when using --resume.")
-        if args.resume and args.interactive:
-            raise ValueError("--interactive cannot be used with --resume.")
-        if args.interactive is None:
-            args.interactive = not args.non_interactive
         if args.resume:
-            args.interactive = False
             args.non_interactive = True
 
         config_source_path = None
@@ -866,10 +876,6 @@ def main():
                 config = json.loads(config_raw)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid config JSON in resume data: {exc}") from exc
-        elif args.interactive:
-            config, config_raw, config_source_path = interactive.prompt_config(args)
-            if config_source_path is not None:
-                config_source_path = Path(config_source_path).resolve()
         else:
             if not args.xyz_file:
                 raise ValueError("xyz_file is required unless --resume is used.")

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from datetime import datetime
 
+from run_opt_paths import get_runs_base_dir
 THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
@@ -154,7 +155,9 @@ def apply_memory_limit(memory_gb, enforce):
     return memory_mb, status
 
 
-def create_run_directory(base_dir="runs"):
+def create_run_directory(base_dir=None):
+    if base_dir is None:
+        base_dir = get_runs_base_dir()
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     candidate = os.path.join(base_dir, timestamp)
     suffix = 1

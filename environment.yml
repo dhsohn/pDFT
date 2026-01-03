@@ -25,5 +25,6 @@ dependencies:
   - ase
   - dftd3-python
   - dftd4
+  - pyside6
   - pytest
   - jsonschema

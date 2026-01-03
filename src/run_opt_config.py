@@ -11,6 +11,8 @@ from typing import Any, Mapping
 from jsonschema import Draft7Validator
 import yaml
 
+from run_opt_paths import get_app_base_dir, get_runs_base_dir
+
 DEFAULT_CHARGE = 0
 DEFAULT_SPIN = None
 DEFAULT_MULTIPLICITY = None
@@ -27,10 +29,15 @@ DEFAULT_RUN_METADATA_PATH = "metadata.json"
 DEFAULT_QCSCHEMA_OUTPUT_PATH = "qcschema_result.json"
 DEFAULT_SCAN_RESULT_PATH = "scan_result.json"
 DEFAULT_SCAN_RESULT_CSV_PATH = "scan_result.csv"
-DEFAULT_QUEUE_PATH = "runs/queue.json"
-DEFAULT_QUEUE_LOCK_PATH = "runs/queue.lock"
-DEFAULT_QUEUE_RUNNER_LOCK_PATH = "runs/queue.runner.lock"
-DEFAULT_QUEUE_RUNNER_LOG_PATH = "log/queue_runner.log"
+
+DEFAULT_APP_BASE_DIR = get_app_base_dir()
+DEFAULT_RUNS_BASE_DIR = get_runs_base_dir()
+DEFAULT_QUEUE_PATH = os.path.join(DEFAULT_RUNS_BASE_DIR, "queue.json")
+DEFAULT_QUEUE_LOCK_PATH = os.path.join(DEFAULT_RUNS_BASE_DIR, "queue.lock")
+DEFAULT_QUEUE_RUNNER_LOCK_PATH = os.path.join(DEFAULT_RUNS_BASE_DIR, "queue.runner.lock")
+DEFAULT_QUEUE_RUNNER_LOG_PATH = os.path.join(
+    DEFAULT_APP_BASE_DIR, "log", "queue_runner.log"
+)
 
 SCAN_DIMENSION_SCHEMA = {
     "type": "object",

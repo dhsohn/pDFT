@@ -8,13 +8,14 @@ version = "0.1.0"
 description = "Lightweight PySCF/ASE workflow for geometry optimization and analysis."
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["jsonschema>=4.18", "PyYAML>=6.0"]
+dependencies = ["jsonschema>=4.18", "PyYAML>=6.0", "PySide6>=6.5"]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "mypy"]
 
 [project.scripts]
 dftflow = "run_opt:main"
+dftflow-gui = "gui_app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -22,6 +23,7 @@ py-modules = [
     "ase_backend",
     "cli",
     "interactive",
+    "gui_app",
     "qcschema_export",
     "run_queue",
     "run_opt",
@@ -30,6 +32,7 @@ py-modules = [
     "run_opt_engine",
     "run_opt_logging",
     "run_opt_metadata",
+    "run_opt_paths",
     "run_opt_resources",
     "run_opt_utils",
 ]

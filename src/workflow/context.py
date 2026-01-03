@@ -136,13 +136,6 @@ def prepare_run_context(args, config: RunConfig, config_raw) -> RunContext:
     ensure_parent_dir(scan_result_path)
     ensure_parent_dir(scan_result_csv_path)
 
-    if args.interactive:
-        config_used_path = resolve_run_path(run_dir, "config_used.json")
-        ensure_parent_dir(config_used_path)
-        with open(config_used_path, "w", encoding="utf-8") as config_used_file:
-            config_used_file.write(config_raw)
-        args.config = config_used_path
-
     checkpoint_path = resolve_run_path(run_dir, "checkpoint.json")
     run_id, run_id_history, attempt, checkpoint_payload = _resolve_run_identity(
         resume_dir,
@@ -241,24 +234,10 @@ def build_molecule_context(args, context: RunContext, memory_mb) -> MoleculeCont
 
     atom_spec, charge, spin, multiplicity = load_xyz(args.xyz_file)
     if context["optimizer_mode"] == "transition_state" and multiplicity is None:
-        if args.interactive:
-            logging.info("TS mode: multiplicity input is required.")
-            while True:
-                raw_value = input("Enter multiplicity (2S+1): ").strip()
-                try:
-                    multiplicity = int(raw_value)
-                except ValueError:
-                    print("Multiplicity must be a positive integer.")
-                    continue
-                if multiplicity < 1:
-                    print("Multiplicity must be a positive integer.")
-                    continue
-                break
-        else:
-            raise ValueError(
-                "Transition-state mode requires multiplicity; "
-                "provide it in the XYZ comment line or run with --interactive."
-            )
+        raise ValueError(
+            "Transition-state mode requires multiplicity; provide it in the "
+            "XYZ comment line."
+        )
     total_electrons = total_electron_count(atom_spec, charge)
     if multiplicity is not None:
         if multiplicity < 1:
