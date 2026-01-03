@@ -90,7 +90,16 @@ scan_result.json
 
 Python: **3.12**
 
-### Conda environment
+### One-line install (end users)
+
+```bash
+conda create -n dftflow -c daehyupsohn -c conda-forge dftflow
+```
+
+This installs DFTFlow plus required runtime dependencies (including Sella and basis-set-exchange).
+Keep `daehyupsohn` first so the SMD-enabled PySCF build is preferred.
+
+### Development install (optional)
 
 ```bash
 git clone https://github.com/dhsohn/DFTFlow.git
@@ -101,7 +110,7 @@ pip install -e .
 pip install sella basis-set-exchange
 ```
 
-### Conda lock (recommended for reproducibility)
+### Conda lock (optional, reproducible dev setup)
 
 ```bash
 conda install -c conda-forge conda-lock -y
@@ -110,9 +119,10 @@ conda-lock install --name dftflow conda-lock.yml
 pip install -e .
 ```
 
-## SMD-enabled PySCF (conda channel)
+## Maintainer: SMD-enabled PySCF (conda channel)
 
 A custom PySCF build with SMD enabled can be built and uploaded to your conda channel.
+The `dftflow` package is expected to be installed from the same channel so it pulls this build.
 
 - Recipe location: `packaging/pyscf-smd/`
 - Uses `CMAKE_ARGS="-DENABLE_SMD=ON"`
