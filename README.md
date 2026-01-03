@@ -86,17 +86,17 @@ irc_result.json
 scan_result.json
 ```
 
-## Installation
+## Installation (SMD-enabled build)
 
 Python: **3.12**
 
-### One-line install (end users)
+Install DFTFlow from the SMD-enabled conda channel:
 
 ```bash
 conda create -n dftflow -c daehyupsohn -c conda-forge dftflow
 ```
 
-This installs DFTFlow plus required runtime dependencies (including Sella and basis-set-exchange).
+This installation includes the SMD-enabled PySCF build required for solvent modeling.
 Keep `daehyupsohn` first so the SMD-enabled PySCF build is preferred.
 
 Launch the desktop app:
@@ -104,63 +104,6 @@ Launch the desktop app:
 ```bash
 dftflow-gui
 ```
-
-### Development install (optional)
-
-```bash
-git clone https://github.com/dhsohn/DFTFlow.git
-cd DFTFlow
-conda env create -f environment.yml
-conda activate DFTFlow
-pip install -e .
-pip install sella basis-set-exchange
-```
-
-### Conda lock (optional, reproducible dev setup)
-
-```bash
-conda install -c conda-forge conda-lock -y
-conda-lock lock -f environment.yml -p osx-arm64 -p osx-64 -p linux-64
-conda-lock install --name dftflow conda-lock.yml
-pip install -e .
-```
-
-## Maintainer: SMD-enabled PySCF (conda channel)
-
-A custom PySCF build with SMD enabled can be built and uploaded to your conda channel.
-The `dftflow` package is expected to be installed from the same channel so it pulls this build.
-
-- Recipe location: `packaging/pyscf-smd/`
-- Uses `CMAKE_ARGS="-DENABLE_SMD=ON"`
-- Output package name: `pyscf` (with build string `smd_...`)
-
-Local build (osx-arm64):
-
-```bash
-conda install -n base -c conda-forge conda-build conda-verify anaconda-client
-conda build packaging/pyscf-smd -c conda-forge
-```
-
-Upload:
-
-```bash
-anaconda login
-anaconda upload ~/miniconda3/envs/dftflow/conda-bld/osx-arm64/pyscf-2.11.0-smd_py3.12_0.conda --user daehyupsohn
-```
-
-Install from channel:
-
-```bash
-conda create -n pyscf-smd-test -c daehyupsohn -c conda-forge pyscf
-conda activate pyscf-smd-test
-python - <<'PY'
-import pyscf
-import pyscf.solvent.smd
-print("SMD enabled OK")
-PY
-```
-
-Note: `linux-64` and `osx-64` builds must be done on those platforms.
 
 ## Usage
 
