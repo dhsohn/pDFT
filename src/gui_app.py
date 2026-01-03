@@ -13,6 +13,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QScatterSeries, QValueAxis
 
 from run_opt_config import validate_run_config
+from run_queue import format_queue_status, load_queue
 from run_opt_paths import get_app_base_dir, get_runs_base_dir
 
 
@@ -112,20 +113,24 @@ def _load_run_entries(base_dir: Path) -> list[RunEntry]:
     return entries
 
 
-class RunSubmitDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None):
+class RunSubmitWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None, on_submit=None):
         super().__init__(parent)
-        self.setWindowTitle("New Run")
-        self.setModal(True)
+        self._on_submit = on_submit
         self.setMinimumWidth(520)
 
         self._atom_labels: list[str] = []
 
-        form = QtWidgets.QFormLayout()
+        form = QtWidgets.QGridLayout()
+        form.setColumnStretch(1, 1)
+        form.setColumnStretch(3, 1)
+        row = 0
         self.xyz_path = QtWidgets.QLineEdit()
         xyz_button = QtWidgets.QPushButton("Browse...")
         xyz_button.clicked.connect(self._pick_xyz)
-        form.addRow("XYZ file", self._wrap_picker(self.xyz_path, xyz_button))
+        form.addWidget(QtWidgets.QLabel("XYZ file"), row, 0)
+        form.addWidget(self._wrap_picker(self.xyz_path, xyz_button), row, 1, 1, 3)
+        row += 1
 
         self.calc_mode = QtWidgets.QComboBox()
         self.calc_mode.addItems(
@@ -138,7 +143,9 @@ class RunSubmitDialog(QtWidgets.QDialog):
             ]
         )
         self.calc_mode.currentIndexChanged.connect(self._update_mode_panel)
-        form.addRow("Simulation", self.calc_mode)
+        form.addWidget(QtWidgets.QLabel("Simulation"), row, 0)
+        form.addWidget(self.calc_mode, row, 1, 1, 3)
+        row += 1
 
         self.basis_box = QtWidgets.QComboBox()
         self.basis_box.setEditable(True)
@@ -189,7 +196,8 @@ class RunSubmitDialog(QtWidgets.QDialog):
         basis_completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
         basis_completer.setFilterMode(QtCore.Qt.MatchContains)
         self.basis_box.setCompleter(basis_completer)
-        form.addRow("Basis", self.basis_box)
+        form.addWidget(QtWidgets.QLabel("Basis"), row, 0)
+        form.addWidget(self.basis_box, row, 1)
 
         self.xc_box = QtWidgets.QComboBox()
         self.xc_box.setEditable(True)
@@ -222,7 +230,9 @@ class RunSubmitDialog(QtWidgets.QDialog):
         xc_completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
         xc_completer.setFilterMode(QtCore.Qt.MatchContains)
         self.xc_box.setCompleter(xc_completer)
-        form.addRow("XC", self.xc_box)
+        form.addWidget(QtWidgets.QLabel("XC"), row, 2)
+        form.addWidget(self.xc_box, row, 3)
+        row += 1
 
         self.solvent_box = QtWidgets.QComboBox()
         self.solvent_box.setEditable(True)
@@ -236,34 +246,125 @@ class RunSubmitDialog(QtWidgets.QDialog):
                 "dichloromethane",
             ]
         )
-        form.addRow("Solvent", self.solvent_box)
+        form.addWidget(QtWidgets.QLabel("Solvent"), row, 0)
+        form.addWidget(self.solvent_box, row, 1)
 
         self.solvent_model_box = QtWidgets.QComboBox()
         self.solvent_model_box.addItems(["none", "pcm", "smd"])
-        form.addRow("Solvent model", self.solvent_model_box)
+        form.addWidget(QtWidgets.QLabel("Solvent model"), row, 2)
+        form.addWidget(self.solvent_model_box, row, 3)
+        row += 1
 
         self.dispersion_box = QtWidgets.QComboBox()
         self.dispersion_box.addItems(["none", "d3bj", "d3zero", "d4"])
-        form.addRow("Dispersion", self.dispersion_box)
+        form.addWidget(QtWidgets.QLabel("Dispersion"), row, 0)
+        form.addWidget(self.dispersion_box, row, 1)
+
+        self.charge_override = QtWidgets.QCheckBox("Override charge/spin/multiplicity")
+        self.charge_override.toggled.connect(self._toggle_charge_fields)
+        form.addWidget(QtWidgets.QLabel("Charge/spin override"), row, 2)
+        form.addWidget(self.charge_override, row, 3)
+        row += 1
+
+        self.charge_value = QtWidgets.QSpinBox()
+        self.charge_value.setRange(-20, 20)
+        self.charge_value.setValue(0)
+        form.addWidget(QtWidgets.QLabel("Charge"), row, 0)
+        form.addWidget(self.charge_value, row, 1)
+
+        self.spin_value = QtWidgets.QSpinBox()
+        self.spin_value.setRange(0, 20)
+        self.spin_value.setValue(0)
+        form.addWidget(QtWidgets.QLabel("Spin (2S)"), row, 2)
+        form.addWidget(self.spin_value, row, 3)
+        row += 1
+
+        self.multiplicity_value = QtWidgets.QSpinBox()
+        self.multiplicity_value.setRange(1, 21)
+        self.multiplicity_value.setValue(1)
+        form.addWidget(QtWidgets.QLabel("Multiplicity"), row, 0)
+        form.addWidget(self.multiplicity_value, row, 1)
+
+        self.threads_value = QtWidgets.QSpinBox()
+        self.threads_value.setRange(0, 128)
+        self.threads_value.setValue(0)
+        self.threads_value.setSpecialValueText("auto")
+        form.addWidget(QtWidgets.QLabel("Threads"), row, 2)
+        form.addWidget(self.threads_value, row, 3)
+        row += 1
+
+        self.memory_value = QtWidgets.QDoubleSpinBox()
+        self.memory_value.setRange(0.0, 1024.0)
+        self.memory_value.setDecimals(2)
+        self.memory_value.setSingleStep(0.5)
+        self.memory_value.setValue(0.0)
+        self.memory_value.setSpecialValueText("auto")
+        form.addWidget(QtWidgets.QLabel("Memory (GB)"), row, 0)
+        form.addWidget(self.memory_value, row, 1)
+
+        self.enforce_memory_limit = QtWidgets.QCheckBox("Enforce OS memory limit")
+        form.addWidget(QtWidgets.QLabel("Memory limit"), row, 2)
+        form.addWidget(self.enforce_memory_limit, row, 3)
+        row += 1
+
+        self.scf_max_cycle = QtWidgets.QSpinBox()
+        self.scf_max_cycle.setRange(0, 2000)
+        self.scf_max_cycle.setValue(0)
+        self.scf_max_cycle.setSpecialValueText("default")
+        form.addWidget(QtWidgets.QLabel("SCF max cycle"), row, 0)
+        form.addWidget(self.scf_max_cycle, row, 1)
+
+        self.scf_conv_tol = QtWidgets.QDoubleSpinBox()
+        self.scf_conv_tol.setRange(0.0, 1.0)
+        self.scf_conv_tol.setDecimals(10)
+        self.scf_conv_tol.setSingleStep(0.000001)
+        self.scf_conv_tol.setValue(0.0)
+        self.scf_conv_tol.setSpecialValueText("default")
+        form.addWidget(QtWidgets.QLabel("SCF conv tol"), row, 2)
+        form.addWidget(self.scf_conv_tol, row, 3)
+        row += 1
+
+        self.scf_diis = QtWidgets.QComboBox()
+        self.scf_diis.addItems(["default", "on", "off", "8", "12"])
+        form.addWidget(QtWidgets.QLabel("SCF DIIS"), row, 0)
+        form.addWidget(self.scf_diis, row, 1)
+
+        self.scf_level_shift = QtWidgets.QDoubleSpinBox()
+        self.scf_level_shift.setRange(0.0, 5.0)
+        self.scf_level_shift.setDecimals(4)
+        self.scf_level_shift.setSingleStep(0.05)
+        self.scf_level_shift.setValue(0.0)
+        self.scf_level_shift.setSpecialValueText("default")
+        form.addWidget(QtWidgets.QLabel("SCF level shift"), row, 2)
+        form.addWidget(self.scf_level_shift, row, 3)
+        row += 1
+
+        self.scf_damping = QtWidgets.QDoubleSpinBox()
+        self.scf_damping.setRange(0.0, 1.0)
+        self.scf_damping.setDecimals(4)
+        self.scf_damping.setSingleStep(0.05)
+        self.scf_damping.setValue(0.0)
+        self.scf_damping.setSpecialValueText("default")
+        form.addWidget(QtWidgets.QLabel("SCF damping"), row, 0)
+        form.addWidget(self.scf_damping, row, 1)
+        row += 1
 
         self.mode_panel = QtWidgets.QStackedWidget()
         self.mode_panel.addWidget(self._build_empty_panel())
         self.mode_panel.addWidget(self._build_optimization_panel())
         self.mode_panel.addWidget(self._build_constraint_panel())
         self.mode_panel.addWidget(self._build_scan_panel())
-        form.addRow("Options", self.mode_panel)
+        form.addWidget(self.mode_panel, row, 0, 1, 4)
 
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self.submit_button = QtWidgets.QPushButton("Start Run")
+        self.submit_button.clicked.connect(self._emit_submit)
 
         layout = QtWidgets.QVBoxLayout()
         layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addWidget(self.submit_button)
         self.setLayout(layout)
         self._update_mode_panel()
+        self._toggle_charge_fields(False)
 
     def _wrap_picker(self, line_edit, button):
         container = QtWidgets.QWidget()
@@ -278,6 +379,15 @@ class RunSubmitDialog(QtWidgets.QDialog):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
         if path:
             target.setText(path)
+
+    def _emit_submit(self):
+        if self._on_submit:
+            self._on_submit()
+
+    def _toggle_charge_fields(self, enabled):
+        self.charge_value.setEnabled(enabled)
+        self.spin_value.setEnabled(enabled)
+        self.multiplicity_value.setEnabled(enabled)
 
     def _pick_xyz(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select XYZ file")
@@ -330,7 +440,9 @@ class RunSubmitDialog(QtWidgets.QDialog):
 
     def _build_optimization_panel(self):
         panel = QtWidgets.QWidget()
-        layout = QtWidgets.QFormLayout()
+        layout = QtWidgets.QGridLayout()
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
         self.opt_optimizer = QtWidgets.QComboBox()
         self.opt_optimizer.addItems(["bfgs", "lbfgs", "fire", "gpmin", "mdmin", "sella"])
         self.opt_fmax = QtWidgets.QDoubleSpinBox()
@@ -341,15 +453,20 @@ class RunSubmitDialog(QtWidgets.QDialog):
         self.opt_steps = QtWidgets.QSpinBox()
         self.opt_steps.setRange(1, 5000)
         self.opt_steps.setValue(200)
-        layout.addRow("Optimizer", self.opt_optimizer)
-        layout.addRow("Fmax", self.opt_fmax)
-        layout.addRow("Max steps", self.opt_steps)
+        layout.addWidget(QtWidgets.QLabel("Optimizer"), 0, 0)
+        layout.addWidget(self.opt_optimizer, 0, 1)
+        layout.addWidget(QtWidgets.QLabel("Fmax"), 0, 2)
+        layout.addWidget(self.opt_fmax, 0, 3)
+        layout.addWidget(QtWidgets.QLabel("Max steps"), 1, 0)
+        layout.addWidget(self.opt_steps, 1, 1)
         panel.setLayout(layout)
         return panel
 
     def _build_constraint_panel(self):
         panel = QtWidgets.QWidget()
-        layout = QtWidgets.QFormLayout()
+        layout = QtWidgets.QGridLayout()
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
         self.constraint_type = QtWidgets.QComboBox()
         self.constraint_type.addItems(["bond", "angle", "dihedral"])
         self.constraint_type.currentIndexChanged.connect(self._update_constraint_fields)
@@ -361,12 +478,18 @@ class RunSubmitDialog(QtWidgets.QDialog):
         self.constraint_value.setRange(-360.0, 360.0)
         self.constraint_value.setDecimals(4)
         self.constraint_value.setSingleStep(0.1)
-        layout.addRow("Constraint type", self.constraint_type)
-        layout.addRow("Atom i", self.constraint_i)
-        layout.addRow("Atom j", self.constraint_j)
-        layout.addRow("Atom k", self.constraint_k)
-        layout.addRow("Atom l", self.constraint_l)
-        layout.addRow("Target value", self.constraint_value)
+        layout.addWidget(QtWidgets.QLabel("Constraint type"), 0, 0)
+        layout.addWidget(self.constraint_type, 0, 1)
+        layout.addWidget(QtWidgets.QLabel("Target value"), 0, 2)
+        layout.addWidget(self.constraint_value, 0, 3)
+        layout.addWidget(QtWidgets.QLabel("Atom i"), 1, 0)
+        layout.addWidget(self.constraint_i, 1, 1)
+        layout.addWidget(QtWidgets.QLabel("Atom j"), 1, 2)
+        layout.addWidget(self.constraint_j, 1, 3)
+        layout.addWidget(QtWidgets.QLabel("Atom k"), 2, 0)
+        layout.addWidget(self.constraint_k, 2, 1)
+        layout.addWidget(QtWidgets.QLabel("Atom l"), 2, 2)
+        layout.addWidget(self.constraint_l, 2, 3)
         self.constraint_optimizer = QtWidgets.QComboBox()
         self.constraint_optimizer.addItems(["bfgs", "lbfgs", "fire", "gpmin", "mdmin", "sella"])
         self.constraint_fmax = QtWidgets.QDoubleSpinBox()
@@ -377,16 +500,21 @@ class RunSubmitDialog(QtWidgets.QDialog):
         self.constraint_steps = QtWidgets.QSpinBox()
         self.constraint_steps.setRange(1, 5000)
         self.constraint_steps.setValue(200)
-        layout.addRow("Optimizer", self.constraint_optimizer)
-        layout.addRow("Fmax", self.constraint_fmax)
-        layout.addRow("Max steps", self.constraint_steps)
+        layout.addWidget(QtWidgets.QLabel("Optimizer"), 3, 0)
+        layout.addWidget(self.constraint_optimizer, 3, 1)
+        layout.addWidget(QtWidgets.QLabel("Fmax"), 3, 2)
+        layout.addWidget(self.constraint_fmax, 3, 3)
+        layout.addWidget(QtWidgets.QLabel("Max steps"), 4, 0)
+        layout.addWidget(self.constraint_steps, 4, 1)
         panel.setLayout(layout)
         self._update_constraint_fields()
         return panel
 
     def _build_scan_panel(self):
         panel = QtWidgets.QWidget()
-        layout = QtWidgets.QFormLayout()
+        layout = QtWidgets.QGridLayout()
+        layout.setColumnStretch(1, 1)
+        layout.setColumnStretch(3, 1)
         self.scan_type = QtWidgets.QComboBox()
         self.scan_type.addItems(["bond", "angle", "dihedral"])
         self.scan_type.currentIndexChanged.connect(self._update_scan_fields)
@@ -408,15 +536,24 @@ class RunSubmitDialog(QtWidgets.QDialog):
         self.scan_step.setRange(0.0001, 360.0)
         self.scan_step.setDecimals(4)
         self.scan_step.setSingleStep(0.1)
-        layout.addRow("Scan type", self.scan_type)
-        layout.addRow("Scan mode", self.scan_mode)
-        layout.addRow("Atom i", self.scan_i)
-        layout.addRow("Atom j", self.scan_j)
-        layout.addRow("Atom k", self.scan_k)
-        layout.addRow("Atom l", self.scan_l)
-        layout.addRow("Start", self.scan_start)
-        layout.addRow("End", self.scan_end)
-        layout.addRow("Step", self.scan_step)
+        layout.addWidget(QtWidgets.QLabel("Scan type"), 0, 0)
+        layout.addWidget(self.scan_type, 0, 1)
+        layout.addWidget(QtWidgets.QLabel("Scan mode"), 0, 2)
+        layout.addWidget(self.scan_mode, 0, 3)
+        layout.addWidget(QtWidgets.QLabel("Atom i"), 1, 0)
+        layout.addWidget(self.scan_i, 1, 1)
+        layout.addWidget(QtWidgets.QLabel("Atom j"), 1, 2)
+        layout.addWidget(self.scan_j, 1, 3)
+        layout.addWidget(QtWidgets.QLabel("Atom k"), 2, 0)
+        layout.addWidget(self.scan_k, 2, 1)
+        layout.addWidget(QtWidgets.QLabel("Atom l"), 2, 2)
+        layout.addWidget(self.scan_l, 2, 3)
+        layout.addWidget(QtWidgets.QLabel("Start"), 3, 0)
+        layout.addWidget(self.scan_start, 3, 1)
+        layout.addWidget(QtWidgets.QLabel("End"), 3, 2)
+        layout.addWidget(self.scan_end, 3, 3)
+        layout.addWidget(QtWidgets.QLabel("Step"), 4, 0)
+        layout.addWidget(self.scan_step, 4, 1)
         panel.setLayout(layout)
         self._update_scan_fields()
         return panel
@@ -492,6 +629,34 @@ class RunSubmitDialog(QtWidgets.QDialog):
             "calculation_mode": calculation_mode,
         }
 
+        threads = self.threads_value.value()
+        if threads > 0:
+            config["threads"] = int(threads)
+        memory_gb = float(self.memory_value.value())
+        if memory_gb > 0:
+            config["memory_gb"] = memory_gb
+            if self.enforce_memory_limit.isChecked():
+                config["enforce_os_memory_limit"] = True
+
+        scf = {}
+        if self.scf_max_cycle.value() > 0:
+            scf["max_cycle"] = int(self.scf_max_cycle.value())
+        if self.scf_conv_tol.value() > 0:
+            scf["conv_tol"] = float(self.scf_conv_tol.value())
+        diis_choice = self.scf_diis.currentText()
+        if diis_choice == "on":
+            scf["diis"] = True
+        elif diis_choice == "off":
+            scf["diis"] = False
+        elif diis_choice.isdigit():
+            scf["diis"] = int(diis_choice)
+        if self.scf_level_shift.value() > 0:
+            scf["level_shift"] = float(self.scf_level_shift.value())
+        if self.scf_damping.value() > 0:
+            scf["damping"] = float(self.scf_damping.value())
+        if scf:
+            config["scf"] = scf
+
         if mode_text == "Optimization":
             optimizer_block = {
                 "optimizer": self.opt_optimizer.currentText().strip(),
@@ -548,10 +713,68 @@ class RunSubmitDialog(QtWidgets.QDialog):
                 return {"xyz": None, "error": "Select all scan atom indices."}
             config["scan"] = scan_config
 
+        xyz_metadata = None
+        if self.charge_override.isChecked():
+            xyz_metadata = {
+                "charge": int(self.charge_value.value()),
+                "spin": int(self.spin_value.value()),
+                "multiplicity": int(self.multiplicity_value.value()),
+            }
+
         return {
             "xyz": self.xyz_path.text().strip() or None,
             "config": config,
+            "xyz_metadata": xyz_metadata,
         }
+
+
+class QueueDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, on_submit=None):
+        super().__init__(parent)
+        self.setWindowTitle("Queue")
+        self.setMinimumSize(900, 600)
+        self._on_submit = on_submit
+
+        splitter = QtWidgets.QSplitter()
+        self.run_form = RunSubmitWidget(self, on_submit=self._handle_submit)
+        splitter.addWidget(self.run_form)
+
+        queue_panel = QtWidgets.QWidget()
+        queue_layout = QtWidgets.QVBoxLayout()
+        queue_layout.setContentsMargins(0, 0, 0, 0)
+        self.queue_view = QtWidgets.QPlainTextEdit()
+        self.queue_view.setReadOnly(True)
+        self.queue_view.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+        queue_layout.addWidget(self.queue_view)
+        queue_panel.setLayout(queue_layout)
+        splitter.addWidget(queue_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(splitter)
+        self.setLayout(layout)
+
+        self._refresh_queue()
+        self.refresh_timer = QtCore.QTimer(self)
+        self.refresh_timer.timeout.connect(self._refresh_queue)
+        self.refresh_timer.start(2000)
+
+    def _refresh_queue(self):
+        try:
+            queue_state = load_queue()
+            formatted = format_queue_status(queue_state)
+            if isinstance(formatted, str):
+                text = formatted
+            else:
+                text = "\n".join(formatted)
+            self.queue_view.setPlainText(text)
+        except Exception as exc:
+            self.queue_view.setPlainText(f"Unable to load queue: {exc}")
+
+    def _handle_submit(self):
+        if self._on_submit:
+            self._on_submit(self.run_form.get_values())
 
 
 class DFTFlowWindow(QtWidgets.QMainWindow):
@@ -584,9 +807,9 @@ class DFTFlowWindow(QtWidgets.QMainWindow):
         toolbar = QtWidgets.QToolBar()
         self.addToolBar(toolbar)
 
-        new_run_action = QtGui.QAction("New Run", self)
-        new_run_action.triggered.connect(self._new_run)
-        toolbar.addAction(new_run_action)
+        queue_action = QtGui.QAction("Queue", self)
+        queue_action.triggered.connect(self._open_queue_dialog)
+        toolbar.addAction(queue_action)
 
         stop_action = QtGui.QAction("Stop Run", self)
         stop_action.triggered.connect(self._stop_run)
@@ -601,7 +824,6 @@ class DFTFlowWindow(QtWidgets.QMainWindow):
         left_panel = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout()
         left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.addWidget(QtWidgets.QLabel("Runs"))
         self.run_list = QtWidgets.QListWidget()
         self.run_list.itemSelectionChanged.connect(self._select_run)
         left_layout.addWidget(self.run_list)
@@ -643,11 +865,7 @@ class DFTFlowWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(splitter)
 
-    def _new_run(self):
-        dialog = RunSubmitDialog(self)
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
-            return
-        values = dialog.get_values()
+    def _submit_run(self, values):
         if values.get("error"):
             QtWidgets.QMessageBox.warning(self, "Invalid input", values["error"])
             return
@@ -670,12 +888,43 @@ class DFTFlowWindow(QtWidgets.QMainWindow):
         config_path = config_dir / f"run_config_{timestamp}.json"
         with config_path.open("w", encoding="utf-8") as handle:
             json.dump(config, handle, indent=2)
+        input_xyz = values["xyz"]
+        if values.get("xyz_metadata"):
+            xyz_dir = Path(self.runs_dir) / "inputs"
+            xyz_dir.mkdir(parents=True, exist_ok=True)
+            xyz_path = xyz_dir / f"input_{timestamp}.xyz"
+            try:
+                with open(input_xyz, "r", encoding="utf-8", errors="replace") as handle:
+                    lines = handle.readlines()
+                if not lines:
+                    raise ValueError("XYZ file is empty.")
+                atom_line = lines[0].rstrip("\n")
+                comment = lines[1].rstrip("\n") if len(lines) > 1 else ""
+                meta_parts = [
+                    f"charge={values['xyz_metadata']['charge']}",
+                    f"spin={values['xyz_metadata']['spin']}",
+                    f"multiplicity={values['xyz_metadata']['multiplicity']}",
+                ]
+                if comment:
+                    comment = f"{comment} {' '.join(meta_parts)}"
+                else:
+                    comment = " ".join(meta_parts)
+                new_lines = [atom_line + "\n", comment + "\n"]
+                new_lines.extend(lines[2:] if len(lines) > 2 else [])
+                with xyz_path.open("w", encoding="utf-8") as handle:
+                    handle.writelines(new_lines)
+                input_xyz = str(xyz_path)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self, "XYZ metadata", f"Failed to apply charge/spin: {exc}"
+                )
+                return
         command = [
             sys.executable,
             "-m",
             "run_opt",
             "run",
-            values["xyz"],
+            input_xyz,
             "--config",
             str(config_path),
         ]
@@ -689,6 +938,10 @@ class DFTFlowWindow(QtWidgets.QMainWindow):
             start_new_session=True,
             env=env,
         )
+
+    def _open_queue_dialog(self):
+        dialog = QueueDialog(self, on_submit=self._submit_run)
+        dialog.exec()
 
     def _open_runs_folder(self):
         url = QtCore.QUrl.fromLocalFile(str(self.runs_dir))

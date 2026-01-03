@@ -474,10 +474,13 @@ def _requeue_failed_entries(queue_path, lock_path):
 
 def _format_queue_status(queue_state):
     entries = queue_state.get("entries") or []
+    lines = []
     if not entries:
-        print("Queue is empty.")
-        return
-    print("Queue status")
+        lines.append("Queue is empty.")
+        for line in lines:
+            print(line)
+        return lines
+    lines.append("Queue status")
     queued_index = 0
     for entry in entries:
         status = entry.get("status", "unknown")
@@ -498,7 +501,7 @@ def _format_queue_status(queue_state):
             timestamp_value = entry.get("ended_at")
         exit_code = entry.get("exit_code")
         exit_code_label = f", exit_code={exit_code}" if exit_code is not None else ""
-        print(
+        lines.append(
             "  [{pos}] {run_id} {status} ({timestamp}={timestamp_value}, priority={priority}{exit_code})".format(
                 pos=position,
                 run_id=entry.get("run_id"),
@@ -511,9 +514,12 @@ def _format_queue_status(queue_state):
         )
         run_dir = entry.get("run_directory")
         if run_dir:
-            print(f"        run_dir={run_dir}")
+            lines.append(f"        run_dir={run_dir}")
         if max_runtime_seconds:
-            print(f"        max_runtime_seconds={max_runtime_seconds}")
+            lines.append(f"        max_runtime_seconds={max_runtime_seconds}")
+    for line in lines:
+        print(line)
+    return lines
 
 
 def _select_queue_entry_timestamp(entry):
