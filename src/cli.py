@@ -274,6 +274,29 @@ def build_parser():
         action="store_true",
         help="Stop the smoke-test run immediately on the first failure.",
     )
+    smoke_parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="Monitor smoke-test progress and auto-resume on stalled logs.",
+    )
+    smoke_parser.add_argument(
+        "--watch-interval",
+        type=int,
+        default=30,
+        help="Polling interval in seconds for smoke-test watch mode (default: 30).",
+    )
+    smoke_parser.add_argument(
+        "--watch-timeout",
+        type=int,
+        default=900,
+        help="Seconds without log updates before auto-resume (default: 900).",
+    )
+    smoke_parser.add_argument(
+        "--watch-max-restarts",
+        type=int,
+        default=0,
+        help="Max auto-resume attempts in watch mode (0 = unlimited).",
+    )
 
     status_parser = subparsers.add_parser(
         "status", help="Show run summaries or recent status listings."

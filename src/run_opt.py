@@ -8,7 +8,9 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import cli
@@ -206,6 +208,77 @@ def _load_smoke_test_status(run_dir):
     except (OSError, json.JSONDecodeError):
         return None
     return metadata.get("status")
+
+
+def _find_latest_smoke_log_mtime(base_run_dir):
+    latest = None
+    for root, _dirs, files in os.walk(base_run_dir):
+        if "run.log" not in files:
+            continue
+        log_path = os.path.join(root, "run.log")
+        try:
+            mtime = os.path.getmtime(log_path)
+        except OSError:
+            continue
+        if latest is None or mtime > latest:
+            latest = mtime
+    return latest
+
+
+def _run_smoke_test_watch(args):
+    if not args.run_dir:
+        args.run_dir = create_run_directory()
+    base_run_dir = str(Path(args.run_dir).expanduser().resolve())
+    os.makedirs(base_run_dir, exist_ok=True)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "run_opt",
+        "smoke-test",
+        "--run-dir",
+        base_run_dir,
+        "--resume",
+    ]
+    if args.config:
+        cmd.extend(["--config", args.config])
+    if args.stop_on_error:
+        cmd.append("--stop-on-error")
+
+    restarts = 0
+    while True:
+        logging.info("Starting smoke-test watch run.")
+        process = subprocess.Popen(cmd)
+        last_activity = _find_latest_smoke_log_mtime(base_run_dir) or time.time()
+
+        while True:
+            return_code = process.poll()
+            if return_code is not None:
+                if return_code == 0:
+                    print(f"Smoke test completed: {base_run_dir}")
+                    return
+                raise SystemExit(return_code)
+
+            latest = _find_latest_smoke_log_mtime(base_run_dir)
+            now = time.time()
+            if latest:
+                last_activity = max(last_activity, latest)
+            if now - last_activity > args.watch_timeout:
+                logging.warning(
+                    "Smoke-test logs stalled for %s seconds; restarting.",
+                    args.watch_timeout,
+                )
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                restarts += 1
+                if args.watch_max_restarts and restarts > args.watch_max_restarts:
+                    raise SystemExit("Smoke-test watch exceeded max restarts.")
+                break
+            time.sleep(args.watch_interval)
 
 
 def _load_resume_checkpoint(resume_dir):
@@ -441,6 +514,11 @@ def main():
             return
 
         if args.command == "smoke-test":
+            if args.watch:
+                if args.resume and not args.run_dir:
+                    raise ValueError("--resume requires --run-dir for smoke-test.")
+                _run_smoke_test_watch(args)
+                return
             base_config, config_path, modes, cases = _prepare_smoke_test_suite(args)
             solvent_map_path = base_config.get("solvent_map") or DEFAULT_SOLVENT_MAP_PATH
             if args.resume and not args.run_dir:
