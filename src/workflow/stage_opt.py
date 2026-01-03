@@ -85,43 +85,51 @@ def run_optimization_stage(
     multiplicity = molecule_context["multiplicity"]
     ks_type = molecule_context["ks_type"]
 
-    logging.info("Running capability check for geometry optimization (SCF + gradient)...")
-    run_capability_check(
-        mol,
-        basis,
-        xc,
-        scf_config,
-        solvent_model,
-        solvent_name,
-        context["eps"],
-        None,
-        "none",
-        require_hessian=False,
-        verbose=verbose,
-        memory_mb=memory_mb,
-        optimizer_mode=optimizer_mode,
-        multiplicity=multiplicity,
-    )
-    if frequency_enabled:
+    skip_capability_check = bool(os.environ.get("DFTFLOW_SKIP_CAPABILITY_CHECK"))
+    if skip_capability_check:
+        logging.warning(
+            "Skipping capability check (DFTFLOW_SKIP_CAPABILITY_CHECK=1)."
+        )
+    else:
         logging.info(
-            "Running capability check for frequency calculation (SCF + gradient + Hessian)..."
+            "Running capability check for geometry optimization (SCF + gradient)..."
         )
         run_capability_check(
             mol,
-            context["sp_basis"],
-            context["sp_xc"],
-            context["sp_scf_config"],
-            context["sp_solvent_model"] if context["sp_solvent_name"] else None,
-            context["sp_solvent_name"],
-            context["sp_eps"],
-            context["freq_dispersion_model"],
-            context["freq_dispersion_mode"],
-            require_hessian=True,
+            basis,
+            xc,
+            scf_config,
+            solvent_model,
+            solvent_name,
+            context["eps"],
+            None,
+            "none",
+            require_hessian=False,
             verbose=verbose,
             memory_mb=memory_mb,
             optimizer_mode=optimizer_mode,
             multiplicity=multiplicity,
         )
+        if frequency_enabled:
+            logging.info(
+                "Running capability check for frequency calculation (SCF + gradient + Hessian)..."
+            )
+            run_capability_check(
+                mol,
+                context["sp_basis"],
+                context["sp_xc"],
+                context["sp_scf_config"],
+                context["sp_solvent_model"] if context["sp_solvent_name"] else None,
+                context["sp_solvent_name"],
+                context["sp_eps"],
+                context["freq_dispersion_model"],
+                context["freq_dispersion_mode"],
+                require_hessian=True,
+                verbose=verbose,
+                memory_mb=memory_mb,
+                optimizer_mode=optimizer_mode,
+                multiplicity=multiplicity,
+            )
 
     logging.info("Starting geometry optimization...")
     logging.info("Run ID: %s", run_id)

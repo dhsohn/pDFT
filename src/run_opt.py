@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cli
@@ -28,6 +29,7 @@ from run_opt_config import (
     load_solvent_map,
 )
 from run_opt_resources import create_run_directory
+from run_opt_metadata import write_run_metadata
 
 TERMINAL_RESUME_STATUSES = {"completed", "failed", "timeout", "canceled"}
 
@@ -109,6 +111,46 @@ def _slugify(value):
     return re.sub(r"[^a-z0-9]+", "-", str(value).strip().lower()).strip("-")
 
 
+def _d3_damping_support_status(xc, dispersion_model):
+    if not dispersion_model:
+        return True, None
+    normalized = str(dispersion_model).strip().lower()
+    if normalized not in ("d3bj", "d3zero"):
+        return True, None
+    try:
+        from dftd3 import ase as dftd3_ase
+    except ImportError:
+        return False, "dftd3 is not installed"
+    damping_key = normalized
+    damping_cls = dftd3_ase._damping_param.get(damping_key)
+    if damping_cls is None:
+        return False, f"no damping parameters for {damping_key}"
+    try:
+        damping_cls(method=xc)
+    except Exception as exc:
+        return False, str(exc)
+    return True, None
+
+
+def _write_smoke_skip_metadata(run_dir, overrides, mode, reason):
+    now = datetime.now().isoformat()
+    metadata = {
+        "status": "skipped",
+        "run_directory": str(run_dir),
+        "run_started_at": now,
+        "run_ended_at": now,
+        "skip_reason": reason,
+        "basis": overrides["basis"],
+        "xc": overrides["xc"],
+        "solvent": overrides["solvent"],
+        "solvent_model": overrides["solvent_model"],
+        "dispersion": overrides["dispersion"],
+        "calculation_mode": mode,
+        "run_metadata_file": str(Path(run_dir) / DEFAULT_RUN_METADATA_PATH),
+    }
+    write_run_metadata(str(Path(run_dir) / DEFAULT_RUN_METADATA_PATH), metadata)
+
+
 def _prepare_smoke_test_suite(args):
     config_path = Path(args.config).expanduser().resolve()
     base_config, _base_raw = load_run_config(config_path)
@@ -159,6 +201,14 @@ def _prepare_smoke_test_suite(args):
     for basis, xc, solvent_model, dispersion in itertools.product(
         basis_options, xc_options, solvent_model_options, dispersion_options
     ):
+        d3_supported, d3_reason = _d3_damping_support_status(xc, dispersion)
+        if not d3_supported:
+            logging.warning(
+                "Skipping dispersion %s for XC %s in smoke tests (%s).",
+                dispersion,
+                xc,
+                d3_reason,
+            )
         if solvent_model:
             for solvent in solvent_options:
                 cases.append(
@@ -168,6 +218,8 @@ def _prepare_smoke_test_suite(args):
                         "solvent_model": solvent_model,
                         "solvent": solvent,
                         "dispersion": dispersion,
+                        "skip": not d3_supported,
+                        "skip_reason": d3_reason,
                     }
                 )
         else:
@@ -178,6 +230,8 @@ def _prepare_smoke_test_suite(args):
                     "solvent_model": None,
                     "solvent": "vacuum",
                     "dispersion": dispersion,
+                    "skip": not d3_supported,
+                    "skip_reason": d3_reason,
                 }
             )
     return base_config, config_path, modes, cases
@@ -208,6 +262,116 @@ def _load_smoke_test_status(run_dir):
     except (OSError, json.JSONDecodeError):
         return None
     return metadata.get("status")
+
+
+def _format_subprocess_returncode(returncode):
+    if returncode is None:
+        return "unknown"
+    if returncode < 0:
+        try:
+            import signal
+
+            signal_name = signal.Signals(-returncode).name
+        except (ValueError, AttributeError):
+            signal_name = f"SIG{-returncode}"
+        return f"signal {signal_name} ({returncode})"
+    return str(returncode)
+
+
+def _run_smoke_test_case(
+    *,
+    args,
+    run_dir,
+    xyz_path,
+    solvent_map_path,
+    smoke_config_path,
+    smoke_config_raw,
+    smoke_config,
+):
+    skip_capability_check = "DFTFLOW_SKIP_CAPABILITY_CHECK"
+    run_args = argparse.Namespace(
+        xyz_file=str(xyz_path),
+        solvent_map=solvent_map_path,
+        config=str(smoke_config_path),
+        interactive=False,
+        non_interactive=True,
+        background=False,
+        no_background=True,
+        run_dir=str(run_dir),
+        resume=None,
+        run_id=None,
+        force_resume=False,
+        queue_priority=0,
+        queue_max_runtime=None,
+        scan_dimension=None,
+        scan_grid=None,
+        scan_mode=None,
+        scan_result_csv=None,
+        queue_runner=False,
+    )
+    if args.no_isolate:
+        previous_skip = os.environ.get(skip_capability_check)
+        os.environ[skip_capability_check] = "1"
+        config = build_run_config(smoke_config)
+        try:
+            workflow.run(
+                run_args,
+                config,
+                smoke_config_raw,
+                str(smoke_config_path),
+                False,
+            )
+        finally:
+            if previous_skip is None:
+                os.environ.pop(skip_capability_check, None)
+            else:
+                os.environ[skip_capability_check] = previous_skip
+        return 0
+    env = os.environ.copy()
+    env[skip_capability_check] = "1"
+    env["PYTHONFAULTHANDLER"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
+    stderr_path = Path(run_dir) / "smoke_subprocess.err"
+    stdout_path = Path(run_dir) / "smoke_subprocess.out"
+    src_dir = str(Path(__file__).resolve().parent)
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = os.pathsep.join([src_dir, existing_pythonpath])
+    else:
+        env["PYTHONPATH"] = src_dir
+    command = [
+        sys.executable,
+        "-X",
+        "faulthandler",
+        "-m",
+        "run_opt",
+        "run",
+        "--non-interactive",
+        str(xyz_path),
+        "--config",
+        str(smoke_config_path),
+        "--run-dir",
+        str(run_dir),
+    ]
+    with open(stdout_path, "a", encoding="utf-8") as stdout_file, open(
+        stderr_path, "a", encoding="utf-8"
+    ) as stderr_file:
+        completed = subprocess.run(
+            command,
+            env=env,
+            cwd=os.getcwd(),
+            check=False,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
+    status_path = Path(run_dir) / "smoke_subprocess.status"
+    status_message = _format_subprocess_returncode(completed.returncode)
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    status_path.write_text(
+        f"{timestamp} exit_code={status_message}\n", encoding="utf-8"
+    )
+    return completed.returncode
 
 
 def _find_latest_smoke_log_mtime(base_run_dir):
@@ -260,6 +424,8 @@ def _run_smoke_test_watch(args):
         cmd.extend(["--config", args.config])
     if args.stop_on_error:
         cmd.append("--stop-on-error")
+    if args.no_isolate:
+        cmd.append("--no-isolate")
 
     def _log_watch(message):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -579,47 +745,45 @@ def main():
                     case_index += 1
                     if args.resume:
                         status = _load_smoke_test_status(run_dir)
-                        if status == "completed":
+                        if status in ("completed", "skipped"):
                             logging.info(
                                 "Skipping completed smoke-test case: %s",
                                 run_dir,
                             )
                             continue
+                    if overrides.get("skip"):
+                        _write_smoke_skip_metadata(
+                            run_dir,
+                            overrides,
+                            mode,
+                            overrides.get("skip_reason"),
+                        )
+                        logging.warning(
+                            "Skipping smoke-test case due to unsupported dispersion: %s",
+                            run_dir,
+                        )
+                        continue
                     smoke_config = _build_smoke_test_config(base_config, mode, overrides)
                     smoke_config_raw = json.dumps(
                         smoke_config, indent=2, ensure_ascii=False
                     )
                     smoke_config_path = run_dir / "config_smoke_test.json"
                     smoke_config_path.write_text(smoke_config_raw, encoding="utf-8")
-                    run_args = argparse.Namespace(
-                        xyz_file=str(xyz_path),
-                        solvent_map=solvent_map_path,
-                        config=str(smoke_config_path),
-                        interactive=False,
-                        non_interactive=True,
-                        background=False,
-                        no_background=True,
-                        run_dir=str(run_dir),
-                        resume=None,
-                        run_id=None,
-                        force_resume=False,
-                        queue_priority=0,
-                        queue_max_runtime=None,
-                        scan_dimension=None,
-                        scan_grid=None,
-                        scan_mode=None,
-                        scan_result_csv=None,
-                        queue_runner=False,
-                    )
                     try:
-                        config = build_run_config(smoke_config)
-                        workflow.run(
-                            run_args,
-                            config,
-                            smoke_config_raw,
-                            str(smoke_config_path),
-                            False,
+                        exit_code = _run_smoke_test_case(
+                            args=args,
+                            run_dir=run_dir,
+                            xyz_path=xyz_path,
+                            solvent_map_path=solvent_map_path,
+                            smoke_config_path=smoke_config_path,
+                            smoke_config_raw=smoke_config_raw,
+                            smoke_config=smoke_config,
                         )
+                        if exit_code != 0:
+                            raise RuntimeError(
+                                "Smoke-test subprocess exited with code "
+                                f"{_format_subprocess_returncode(exit_code)}."
+                            )
                     except Exception as error:
                         failures.append(
                             {

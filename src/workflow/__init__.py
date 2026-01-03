@@ -258,6 +258,8 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 solvent_model,
                 interactive=args.interactive,
             )
+            context["solvent_name"] = solvent_name
+            context["solvent_model"] = solvent_model
 
             eps = None
             apply_scf = calculation_mode == "optimization" or (
@@ -453,31 +455,45 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                     optimizer_mode=optimizer_mode,
                     multiplicity=multiplicity,
                 )
-                logging.info(
-                    "Running capability check for %s calculation (SCF%s)...",
-                    "single-point"
-                    if calculation_mode == "single_point"
-                    else "frequency"
-                    if calculation_mode == "frequency"
-                    else "IRC",
-                    " + Hessian" if calculation_mode in ("frequency", "irc") else "",
+                skip_capability_check = bool(
+                    os.environ.get("DFTFLOW_SKIP_CAPABILITY_CHECK")
                 )
-                run_capability_check(
-                    mol,
-                    calc_basis,
-                    calc_xc,
-                    calc_scf_config,
-                    calc_solvent_model if calc_solvent_name else None,
-                    calc_solvent_name,
-                    calc_eps,
-                    calc_dispersion_model if calculation_mode == "frequency" else None,
-                    freq_dispersion_mode if calculation_mode == "frequency" else "none",
-                    require_hessian=calculation_mode in ("frequency", "irc"),
-                    verbose=verbose,
-                    memory_mb=memory_mb,
-                    optimizer_mode=optimizer_mode,
-                    multiplicity=multiplicity,
-                )
+                if skip_capability_check:
+                    logging.warning(
+                        "Skipping capability check (DFTFLOW_SKIP_CAPABILITY_CHECK=1)."
+                    )
+                else:
+                    logging.info(
+                        "Running capability check for %s calculation (SCF%s)...",
+                        "single-point"
+                        if calculation_mode == "single_point"
+                        else "frequency"
+                        if calculation_mode == "frequency"
+                        else "IRC",
+                        " + Hessian"
+                        if calculation_mode in ("frequency", "irc")
+                        else "",
+                    )
+                    run_capability_check(
+                        mol,
+                        calc_basis,
+                        calc_xc,
+                        calc_scf_config,
+                        calc_solvent_model if calc_solvent_name else None,
+                        calc_solvent_name,
+                        calc_eps,
+                        calc_dispersion_model
+                        if calculation_mode == "frequency"
+                        else None,
+                        freq_dispersion_mode
+                        if calculation_mode == "frequency"
+                        else "none",
+                        require_hessian=calculation_mode in ("frequency", "irc"),
+                        verbose=verbose,
+                        memory_mb=memory_mb,
+                        optimizer_mode=optimizer_mode,
+                        multiplicity=multiplicity,
+                    )
                 logging.info("Run ID: %s", run_id)
                 logging.info("Run directory: %s", run_dir)
                 if thread_count:

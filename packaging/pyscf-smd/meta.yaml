@@ -1,0 +1,56 @@
+{% set name = "pyscf" %}
+{% set version = "2.11.0" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  git_url: https://github.com/pyscf/pyscf.git
+  git_rev: v{{ version }}
+
+build:
+  number: 0
+  string: smd_py{{ PY_VER }}_{{ PKG_BUILDNUM }}
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
+    - {{ compiler('fortran') }}
+    - cmake
+    - make
+  host:
+    - python
+    - pip
+    - setuptools
+    - numpy
+    - scipy
+    - h5py
+    - libcint
+    - libxc
+    - libxcfun  # [not arm64]
+    - openblas
+  run:
+    - python
+    - numpy
+    - scipy
+    - h5py
+    - libcint
+    - libxc
+    - libxcfun  # [not arm64]
+    - openblas
+
+test:
+  imports:
+    - pyscf
+    - pyscf.solvent.smd
+
+about:
+  home: https://pyscf.org/
+  summary: PySCF with SMD enabled.
+  license: Apache-2.0
+
+extra:
+  recipe-maintainers:
+    - daehyupsohn

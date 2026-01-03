@@ -275,6 +275,11 @@ def build_parser():
         help="Stop the smoke-test run immediately on the first failure.",
     )
     smoke_parser.add_argument(
+        "--no-isolate",
+        action="store_true",
+        help="Run smoke-test cases in the same process (default: isolated subprocesses).",
+    )
+    smoke_parser.add_argument(
         "--watch",
         action="store_true",
         help="Monitor smoke-test progress and auto-resume on stalled logs.",
