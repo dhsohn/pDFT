@@ -249,7 +249,7 @@ def parse_dispersion_settings(
         except ImportError as exc:
             raise ImportError(
                 "DFTD4 dispersion requested but the dftd4 package is not installed. "
-                "Install it with `conda install -c conda-forge dftd4` or `pip install dftd4`."
+                "Install it with `conda install -c daehyupsohn -c conda-forge dftd4`."
             ) from exc
 
         param_names, accepts_kwargs = _signature_info(DFTD4)

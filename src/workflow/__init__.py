@@ -118,15 +118,15 @@ def run_doctor():
         _record_check("solvent_map (package resource)", False, _solvent_map_resource_hint(exc))
 
     checks = [
-        ("ase", "Install with: pip install ase"),
-        ("ase.io", "Install with: pip install ase"),
-        ("pyscf", "Install with: pip install pyscf"),
-        ("pyscf.dft", "Install with: pip install pyscf"),
-        ("pyscf.gto", "Install with: pip install pyscf"),
-        ("pyscf.hessian.thermo", "Install with: pip install pyscf"),
-        ("dftd3", "Install with: pip install dftd3"),
-        ("dftd4", "Install with: pip install dftd4"),
-        ("sella", "Install with: pip install sella", "sella (TS optimizer)"),
+        ("ase", "Install with: conda install -c daehyupsohn -c conda-forge ase"),
+        ("ase.io", "Install with: conda install -c daehyupsohn -c conda-forge ase"),
+        ("pyscf", "Install with: conda install -c daehyupsohn -c conda-forge pyscf"),
+        ("pyscf.dft", "Install with: conda install -c daehyupsohn -c conda-forge pyscf"),
+        ("pyscf.gto", "Install with: conda install -c daehyupsohn -c conda-forge pyscf"),
+        ("pyscf.hessian.thermo", "Install with: conda install -c daehyupsohn -c conda-forge pyscf"),
+        ("dftd3", "Install with: conda install -c daehyupsohn -c conda-forge dftd3-python"),
+        ("dftd4", "Install with: conda install -c daehyupsohn -c conda-forge dftd4"),
+        ("sella", "Install with: conda install -c daehyupsohn -c conda-forge sella", "sella (TS optimizer)"),
     ]
     for module_name, hint, *label in checks:
         _check_import(module_name, hint, label[0] if label else None)

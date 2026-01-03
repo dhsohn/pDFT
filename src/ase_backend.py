@@ -392,7 +392,7 @@ def _run_ase_optimizer(
         if importlib.util.find_spec("sella") is None:
             raise ImportError(
                 "Transition-state optimization requires the Sella optimizer. "
-                "Install it with `pip install sella`."
+                "Install it with `conda install -c daehyupsohn -c conda-forge sella`."
             )
         from sella import Sella
 
