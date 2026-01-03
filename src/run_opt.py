@@ -196,6 +196,18 @@ def _prepare_smoke_test_run_dir(base_run_dir, mode, overrides, index):
     return run_dir
 
 
+def _load_smoke_test_status(run_dir):
+    metadata_path = Path(run_dir) / DEFAULT_RUN_METADATA_PATH
+    try:
+        if not metadata_path.exists():
+            return None
+        with metadata_path.open("r", encoding="utf-8") as metadata_file:
+            metadata = json.load(metadata_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return metadata.get("status")
+
+
 def _load_resume_checkpoint(resume_dir):
     resume_path = Path(resume_dir).expanduser().resolve()
     if not resume_path.exists() or not resume_path.is_dir():
@@ -431,6 +443,8 @@ def main():
         if args.command == "smoke-test":
             base_config, config_path, modes, cases = _prepare_smoke_test_suite(args)
             solvent_map_path = base_config.get("solvent_map") or DEFAULT_SOLVENT_MAP_PATH
+            if args.resume and not args.run_dir:
+                raise ValueError("--resume requires --run-dir for smoke-test.")
             base_run_dir = args.run_dir or create_run_directory()
             base_run_dir = str(Path(base_run_dir).expanduser().resolve())
             os.makedirs(base_run_dir, exist_ok=True)
@@ -445,6 +459,14 @@ def main():
                         base_run_dir, mode, overrides, case_index
                     )
                     case_index += 1
+                    if args.resume:
+                        status = _load_smoke_test_status(run_dir)
+                        if status == "completed":
+                            logging.info(
+                                "Skipping completed smoke-test case: %s",
+                                run_dir,
+                            )
+                            continue
                     smoke_config = _build_smoke_test_config(base_config, mode, overrides)
                     smoke_config_raw = json.dumps(
                         smoke_config, indent=2, ensure_ascii=False
@@ -493,6 +515,15 @@ def main():
                                 "error": str(error),
                             }
                         )
+                        if args.stop_on_error:
+                            print("Smoke test stopped on error.")
+                            print(
+                                "  {mode} {basis} {xc} {solvent_model}/{solvent} "
+                                "{dispersion} -> {run_dir} ({error})".format(
+                                    **failures[-1]
+                                )
+                            )
+                            raise SystemExit(1)
                         continue
             if failures:
                 print(

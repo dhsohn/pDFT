@@ -264,6 +264,16 @@ def build_parser():
         "--run-dir",
         help="Optional base run directory for smoke-test output.",
     )
+    smoke_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a smoke-test run by skipping completed cases in --run-dir.",
+    )
+    smoke_parser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop the smoke-test run immediately on the first failure.",
+    )
 
     status_parser = subparsers.add_parser(
         "status", help="Show run summaries or recent status listings."
