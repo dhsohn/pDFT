@@ -319,6 +319,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 "pyscf_chkfile"
             ):
                 _warn_missing_chkfile("Resume mode (single-point):", sp_chkfile)
+            context["sp_chkfile"] = sp_chkfile
             sp_solvent_name = (
                 single_point_config.solvent
                 if single_point_config and single_point_config.solvent

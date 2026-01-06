@@ -33,6 +33,7 @@ from .utils import (
     _dimension_key,
     _merge_constraints,
     _parse_scan_dimensions,
+    _seed_scf_checkpoint,
 )
 
 
@@ -147,6 +148,7 @@ def _run_scan_point(
     scan_mode,
     xyz_file,
     atoms_template=None,
+    seed_chkfile=None,
     scan_dir,
     run_dir,
     charge,
@@ -185,6 +187,15 @@ def _run_scan_point(
     _apply_scan_geometry(atoms, dimensions, values)
     ase_write(input_xyz_path, atoms)
     point_scf_config = _prepare_point_scf_config(scf_config, point_run_dir, parallel)
+    if seed_chkfile and point_scf_config.get("chkfile"):
+        target_chkfile = resolve_run_path(
+            point_run_dir, point_scf_config.get("chkfile")
+        )
+        _seed_scf_checkpoint(
+            seed_chkfile,
+            target_chkfile,
+            label=f"scan point {index}",
+        )
     n_steps = None
     if scan_mode == "optimization":
         output_xyz_path = resolve_run_path(
@@ -329,6 +340,7 @@ def run_scan_point_from_manifest(manifest_path, index):
         dimensions=manifest.get("dimensions") or [],
         scan_mode=manifest.get("scan_mode"),
         xyz_file=manifest.get("xyz_file"),
+        seed_chkfile=settings.get("seed_chkfile"),
         scan_dir=manifest.get("scan_dir"),
         run_dir=target.get("work_dir") or manifest.get("run_dir"),
         charge=settings.get("charge"),
@@ -416,6 +428,9 @@ def run_scan_stage(
     optimizer_mode = context["optimizer_mode"]
     optimizer_ase_dict = context["optimizer_ase_dict"]
     constraints = context["constraints"]
+    scan_seed_chkfile = (
+        calc_scf_config.get("chkfile") if isinstance(calc_scf_config, dict) else None
+    )
 
     if scan_mode == "single_point":
         calc_basis = context["sp_basis"]
@@ -540,6 +555,7 @@ def run_scan_stage(
                 "basis": calc_basis,
                 "xc": calc_xc,
                 "scf_config": calc_scf_config,
+                "seed_chkfile": scan_seed_chkfile,
                 "solvent": calc_solvent_name,
                 "solvent_model": calc_solvent_model if calc_solvent_name else None,
                 "solvent_eps": calc_eps,
@@ -604,6 +620,7 @@ def run_scan_stage(
                             dimensions=dimensions,
                             scan_mode=scan_mode,
                             xyz_file=args.xyz_file,
+                            seed_chkfile=scan_seed_chkfile,
                             scan_dir=scan_dir,
                             run_dir=point_run_dir,
                             charge=charge,
@@ -655,6 +672,7 @@ def run_scan_stage(
                     scan_mode=scan_mode,
                     xyz_file=args.xyz_file,
                     atoms_template=atoms_template,
+                    seed_chkfile=scan_seed_chkfile,
                     scan_dir=scan_dir,
                     run_dir=run_dir,
                     charge=charge,

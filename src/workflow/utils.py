@@ -2,9 +2,10 @@ import json
 import logging
 import os
 import re
+import shutil
 
 from run_opt_metadata import get_package_version, write_checkpoint
-from run_opt_resources import resolve_run_path
+from run_opt_resources import ensure_parent_dir, resolve_run_path
 from run_opt_config import DEFAULT_SCF_CHKFILE
 
 
@@ -87,6 +88,35 @@ def _warn_missing_chkfile(resume_label, chkfile_path):
             resume_label,
             chkfile_path,
         )
+
+
+def _seed_scf_checkpoint(source_path, target_path, label=None):
+    if not source_path or not target_path:
+        return False
+    source_abs = os.path.abspath(source_path)
+    target_abs = os.path.abspath(target_path)
+    if source_abs == target_abs:
+        return False
+    if not os.path.exists(source_abs):
+        return False
+    if os.path.exists(target_abs):
+        return False
+    ensure_parent_dir(target_abs)
+    try:
+        shutil.copy2(source_abs, target_abs)
+        if label:
+            logging.info("Seeded SCF chkfile for %s from %s.", label, source_abs)
+        else:
+            logging.info("Seeded SCF chkfile from %s.", source_abs)
+        return True
+    except Exception as exc:
+        logging.warning(
+            "Failed to seed SCF chkfile %s -> %s: %s",
+            source_abs,
+            target_abs,
+            exc,
+        )
+        return False
 
 
 def _frequency_versions():

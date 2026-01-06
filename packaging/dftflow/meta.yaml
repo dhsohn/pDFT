@@ -9,7 +9,7 @@ source:
   path: ../..
 
 build:
-  number: 19
+  number: 20
   noarch: python
 
 requirements:

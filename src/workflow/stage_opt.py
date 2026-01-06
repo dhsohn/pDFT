@@ -35,6 +35,7 @@ from .utils import (
     _evaluate_irc_profile,
     _frequency_units,
     _frequency_versions,
+    _seed_scf_checkpoint,
     _thermochemistry_payload,
 )
 
@@ -468,6 +469,21 @@ def run_optimization_stage(
     frequency_payload = None
     irc_payload = None
     sp_result = None
+    base_chkfile = context.get("pyscf_chkfile")
+    sp_chkfile = context.get("sp_chkfile")
+    if base_chkfile and sp_chkfile and base_chkfile != sp_chkfile:
+        if context["basis"] == context["sp_basis"]:
+            _seed_scf_checkpoint(
+                base_chkfile,
+                sp_chkfile,
+                label="post-optimization",
+            )
+        else:
+            logging.info(
+                "Skipping SCF checkpoint seed (basis mismatch: %s vs %s).",
+                context["basis"],
+                context["sp_basis"],
+            )
     if frequency_enabled:
         logging.info("Calculating harmonic frequencies for optimized geometry...")
         try:

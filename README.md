@@ -208,6 +208,7 @@ dftflow queue prune --keep-days 30
 - `solvent_dielectric.json` provides PCM epsilon map.
 - `frequency_dispersion_mode` defaults to `none`.
 - SCF checkpoints default to `scf.chk` in the run directory for faster restarts.
+- SCF checkpoints are reused across optimization → frequency/single-point and scan points (set `chkfile: null` to disable).
 
 ## Repository structure
 
