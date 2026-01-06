@@ -30,7 +30,7 @@ from run_opt_config import (
     load_run_config,
     load_solvent_map,
 )
-from run_opt_paths import get_smoke_runs_base_dir
+from run_opt_paths import get_runs_base_dir, get_smoke_runs_base_dir
 from run_opt_resources import create_run_directory, maybe_auto_archive_runs
 from run_opt_metadata import write_run_metadata
 
@@ -74,6 +74,57 @@ QUICK_SOLVENT_MODELS = (None, "smd")
 
 def _normalize_solvent_key(name):
     return "".join(char for char in str(name).lower() if char.isalnum())
+
+
+def _read_json_file(path: Path) -> dict | None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _index_entry_from_metadata(metadata_path: Path, metadata: dict) -> dict:
+    run_dir = metadata.get("run_directory") or str(metadata_path.parent)
+    return {
+        "run_dir": str(Path(run_dir).resolve()),
+        "metadata_path": str(metadata_path.resolve()),
+        "status": metadata.get("status"),
+        "run_started_at": metadata.get("run_started_at"),
+        "run_ended_at": metadata.get("run_ended_at"),
+        "calculation_mode": metadata.get("calculation_mode"),
+        "basis": metadata.get("basis"),
+        "xc": metadata.get("xc"),
+        "solvent": metadata.get("solvent"),
+        "solvent_model": metadata.get("solvent_model"),
+        "dispersion": metadata.get("dispersion"),
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+def _load_run_entries(base_dir: Path, limit: int | None = None) -> list[dict]:
+    entries: list[dict] = []
+    if not base_dir.exists():
+        return entries
+    for entry in base_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        metadata_path = entry / DEFAULT_RUN_METADATA_PATH
+        if not metadata_path.exists():
+            continue
+        metadata = _read_json_file(metadata_path)
+        if not metadata:
+            continue
+        entries.append(_index_entry_from_metadata(metadata_path, metadata))
+    entries.sort(
+        key=lambda item: os.path.getmtime(item["metadata_path"])
+        if os.path.exists(item["metadata_path"])
+        else 0,
+        reverse=True,
+    )
+    if limit:
+        entries = entries[:limit]
+    return entries
 
 
 def _build_smoke_test_config(base_config, mode, overrides):
@@ -909,6 +960,12 @@ def main():
             workflow.run_doctor()
             return
 
+        if args.command == "scan-point":
+            from workflow.stage_scan import run_scan_point_from_manifest
+
+            run_scan_point_from_manifest(args.manifest, args.index)
+            return
+
         if args.command == "queue":
             if args.queue_command == "status":
                 run_queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
@@ -980,6 +1037,17 @@ def main():
                 run_queue.print_status(args.run_path, DEFAULT_RUN_METADATA_PATH)
                 return
             raise ValueError("status requires a run path or --recent.")
+
+        if args.command == "list-runs":
+            runs_dir = args.runs_dir or get_runs_base_dir()
+            entries = _load_run_entries(Path(runs_dir), limit=args.limit)
+            payload = {
+                "schema_version": 1,
+                "updated_at": datetime.now().isoformat(),
+                "entries": entries,
+            }
+            print(json.dumps(payload))
+            return
 
         if args.command == "validate-config":
             config_path = args.config_path or args.config

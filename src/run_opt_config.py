@@ -302,6 +302,12 @@ RUN_CONFIG_SCHEMA = {
                 "end": {"type": ["number", "integer"]},
                 "step": {"type": ["number", "integer"]},
                 "mode": {"type": "string", "enum": ["optimization", "single_point"]},
+                "executor": {
+                    "type": "string",
+                    "enum": ["serial", "local", "manifest"],
+                },
+                "max_workers": {"type": ["integer", "null"], "minimum": 1},
+                "manifest_file": {"type": ["string", "null"]},
                 "dimensions": {
                     "type": "array",
                     "minItems": 1,
@@ -321,6 +327,12 @@ RUN_CONFIG_SCHEMA = {
             "type": ["object", "null"],
             "properties": {
                 "mode": {"type": "string", "enum": ["optimization", "single_point"]},
+                "executor": {
+                    "type": "string",
+                    "enum": ["serial", "local", "manifest"],
+                },
+                "max_workers": {"type": ["integer", "null"], "minimum": 1},
+                "manifest_file": {"type": ["string", "null"]},
                 "dimensions": {
                     "type": "array",
                     "minItems": 2,
@@ -1071,6 +1083,27 @@ def validate_run_config(config):
     def _validate_scan_config(scan, name, require_dimensions=False):
         if not isinstance(scan, dict):
             raise ValueError(f"Config '{name}' must be an object.")
+        executor_value = scan.get("executor")
+        if executor_value is not None:
+            if not isinstance(executor_value, str):
+                raise ValueError(f"Config '{name}.executor' must be a string.")
+            if executor_value not in ("serial", "local", "manifest"):
+                raise ValueError(
+                    "Config '{name}.executor' must be one of: serial, local, manifest.".format(
+                        name=name
+                    )
+                )
+        max_workers = scan.get("max_workers")
+        if max_workers is not None:
+            if not is_int(max_workers) or max_workers < 1:
+                raise ValueError(
+                    "Config '{name}.max_workers' must be a positive integer.".format(
+                        name=name
+                    )
+                )
+        manifest_file = scan.get("manifest_file")
+        if manifest_file is not None and not isinstance(manifest_file, str):
+            raise ValueError(f"Config '{name}.manifest_file' must be a string.")
         mode_value = scan.get("mode")
         if mode_value is not None:
             if not isinstance(mode_value, str):

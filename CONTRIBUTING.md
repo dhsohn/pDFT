@@ -1,7 +1,7 @@
 # Contributing to DFTFlow
 
 Thanks for helping improve DFTFlow. This repo targets conda-only distribution and
-desktop GUI workflows, so please keep that context in mind when proposing changes.
+the core CLI workflow; the desktop GUI lives in the separate `dftflow_gui` repo.
 
 ## Quick start
 

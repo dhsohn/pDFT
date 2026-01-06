@@ -9,7 +9,7 @@ source:
   path: ../..
 
 build:
-  number: 17
+  number: 18
   noarch: python
 
 requirements:
@@ -28,8 +28,6 @@ requirements:
     - numpy
     - pyscf * smd_py*
     - pyyaml >=6.0
-    - pyside6
-    - qt6-charts
     - sella
     - scipy
 

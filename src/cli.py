@@ -11,7 +11,16 @@ def _normalize_cli_args(argv):
     if not argv:
         return argv
     command = argv[0]
-    commands = {"run", "doctor", "validate-config", "status", "queue", "smoke-test"}
+    commands = {
+        "run",
+        "doctor",
+        "validate-config",
+        "status",
+        "queue",
+        "smoke-test",
+        "scan-point",
+        "list-runs",
+    }
     if command in {"-h", "--help"}:
         return argv
     if command in commands:
@@ -297,6 +306,22 @@ def build_parser():
         help="Max auto-resume attempts in watch mode (0 = unlimited).",
     )
 
+    scan_point_parser = subparsers.add_parser(
+        "scan-point",
+        help=argparse.SUPPRESS,
+    )
+    scan_point_parser.add_argument(
+        "--manifest",
+        required=True,
+        help=argparse.SUPPRESS,
+    )
+    scan_point_parser.add_argument(
+        "--index",
+        type=int,
+        required=True,
+        help=argparse.SUPPRESS,
+    )
+
     status_parser = subparsers.add_parser(
         "status", help="Show run summaries or recent status listings."
     )
@@ -310,6 +335,20 @@ def build_parser():
         type=int,
         metavar="N",
         help="Show a summary list for the most recent N runs.",
+    )
+
+    list_runs_parser = subparsers.add_parser(
+        "list-runs", help="List recent runs as JSON (for GUI/remote clients)."
+    )
+    list_runs_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Max runs to return (default: 20).",
+    )
+    list_runs_parser.add_argument(
+        "--runs-dir",
+        help="Optional runs directory override (defaults to DFTFLOW_BASE_DIR/runs).",
     )
 
     queue_parser = subparsers.add_parser(

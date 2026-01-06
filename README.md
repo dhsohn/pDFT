@@ -17,7 +17,7 @@ to the machine where runs are submitted.
 ## Highlights
 
 - **Reproducible runs**: config, environment, and git metadata captured per run.
-- **Desktop GUI + CLI backend**: GUI for submit/monitor/view, CLI for automation.
+- **Desktop GUI (separate app)**: install `dftflow_gui` for submit/monitor/view.
 - **Chained workflows**: optimization → frequency → single-point in one execution.
 - **Solvent + dispersion support**: PCM/SMD, D3/D4 with guardrails.
 - **Queue and status tooling**: background runs and quick status views.
@@ -117,19 +117,13 @@ Note: DFTFlow is distributed via conda only. `pip install dftflow` (or
 This installation includes the SMD-enabled PySCF build required for solvent modeling.
 Keep `daehyupsohn` first so the SMD-enabled PySCF build is preferred.
 
-Launch the desktop app:
-
-```bash
-dftflow-gui
-```
+Desktop GUI is distributed separately (see the `dftflow_gui` repository).
 
 ## Usage
 
-### Desktop GUI (default)
+### Desktop GUI
 
-```bash
-dftflow-gui
-```
+Install and launch the separate `dftflow_gui` app.
 
 ### CLI run
 
@@ -222,7 +216,6 @@ src/
   run_opt_metadata.py
   run_opt_paths.py
   run_opt_resources.py
-  gui_app.py
 packaging/
   pyscf-smd/
 run_config.json
