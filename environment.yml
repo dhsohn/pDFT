@@ -24,6 +24,6 @@ dependencies:
   - pyscf
   - ase
   - dftd3-python
-  - dftd4
+  - dftd4-python
   - pytest
   - pydantic

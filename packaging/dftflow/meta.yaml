@@ -9,7 +9,7 @@ source:
   path: ../..
 
 build:
-  number: 22
+  number: 23
   noarch: python
 
 requirements:
@@ -21,7 +21,7 @@ requirements:
     - python >=3.12,<3.13
     - ase
     - dftd3-python
-    - dftd4
+    - dftd4-python
     - h5py
     - basis-set-exchange
     - numpy

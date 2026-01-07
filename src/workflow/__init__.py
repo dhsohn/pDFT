@@ -53,6 +53,8 @@ from .utils import (
     _normalize_dispersion_settings,
     _normalize_frequency_dispersion_mode,
     _normalize_solvent_settings,
+    _prepare_frequency_scf_config,
+    _recommend_density_fit,
     _resolve_scf_chkfile,
     _warn_missing_chkfile,
 )
@@ -125,7 +127,7 @@ def run_doctor():
         ("pyscf.gto", "Install with: conda install -c daehyupsohn -c conda-forge pyscf"),
         ("pyscf.hessian.thermo", "Install with: conda install -c daehyupsohn -c conda-forge pyscf"),
         ("dftd3", "Install with: conda install -c daehyupsohn -c conda-forge dftd3-python"),
-        ("dftd4", "Install with: conda install -c daehyupsohn -c conda-forge dftd4"),
+        ("dftd4", "Install with: conda install -c daehyupsohn -c conda-forge dftd4-python"),
         ("sella", "Install with: conda install -c daehyupsohn -c conda-forge sella", "sella (TS optimizer)"),
     ]
     for module_name, hint, *label in checks:
@@ -170,6 +172,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
     frequency_output_path = context["frequency_output_path"]
     event_log_path = context["event_log_path"]
     run_id = context["run_id"]
+    profiling_enabled = bool(context.get("profiling_enabled"))
     if run_in_background:
         enqueue_background_run(args, context)
         return
@@ -232,6 +235,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
             charge = molecule_context["charge"]
             spin = molecule_context["spin"]
             multiplicity = molecule_context["multiplicity"]
+            _recommend_density_fit(scf_config, mol, label="Base SCF")
 
             calculation_label = {
                 "optimization": "Geometry optimization",
@@ -315,6 +319,8 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                 else scf_config
             )
             sp_chkfile = _resolve_scf_chkfile(sp_scf_config, run_dir)
+            if sp_scf_config is not scf_config:
+                _recommend_density_fit(sp_scf_config, mol, label="Single-point SCF")
             if context.get("resume_dir") and sp_chkfile and sp_chkfile != context.get(
                 "pyscf_chkfile"
             ):
@@ -405,23 +411,51 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
             context["sp_eps"] = sp_eps
 
             frequency_config = config.frequency
+            frequency_use_chkfile = True
+            if frequency_config and frequency_config.use_chkfile is not None:
+                frequency_use_chkfile = bool(frequency_config.use_chkfile)
+            freq_scf_config = _prepare_frequency_scf_config(
+                sp_scf_config,
+                run_dir,
+                frequency_use_chkfile,
+            )
+            context["frequency_use_chkfile"] = frequency_use_chkfile
+            context["freq_scf_config"] = freq_scf_config
             freq_dispersion_mode = _normalize_frequency_dispersion_mode(
                 frequency_config.dispersion if frequency_config else None
             )
             freq_dispersion_step = None
             if frequency_config and frequency_config.dispersion_step is not None:
                 freq_dispersion_step = frequency_config.dispersion_step
-            if frequency_config and "dispersion_model" in frequency_config.raw:
-                freq_dispersion_raw = frequency_config.dispersion_model
+            if freq_dispersion_mode == "none":
+                if frequency_config and (
+                    "dispersion_model" in frequency_config.raw
+                    or frequency_config.dispersion_step is not None
+                ):
+                    logging.info(
+                        "Frequency dispersion disabled; ignoring dispersion overrides."
+                    )
+                freq_dispersion_model = None
+                freq_dispersion_step = None
             else:
-                freq_dispersion_raw = sp_dispersion_model
+                if frequency_config and "dispersion_model" in frequency_config.raw:
+                    freq_dispersion_raw = frequency_config.dispersion_model
+                else:
+                    freq_dispersion_raw = sp_dispersion_model
 
-            freq_dispersion_model = _normalize_dispersion_settings(
-                "Frequency",
-                sp_xc,
-                freq_dispersion_raw,
-                allow_dispersion=True,
-            )
+                freq_dispersion_model = _normalize_dispersion_settings(
+                    "Frequency",
+                    sp_xc,
+                    freq_dispersion_raw,
+                    allow_dispersion=True,
+                )
+                if freq_dispersion_mode != "numerical":
+                    if freq_dispersion_step is not None:
+                        logging.info(
+                            "Frequency dispersion mode '%s' ignores dispersion_step.",
+                            freq_dispersion_mode,
+                        )
+                    freq_dispersion_step = None
             context["freq_dispersion_mode"] = freq_dispersion_mode
             context["freq_dispersion_model"] = freq_dispersion_model
             context["freq_dispersion_step"] = freq_dispersion_step
@@ -442,7 +476,10 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
             if calculation_mode != "optimization":
                 calc_basis = sp_basis
                 calc_xc = sp_xc
-                calc_scf_config = sp_scf_config
+                if calculation_mode == "frequency":
+                    calc_scf_config = context.get("freq_scf_config") or sp_scf_config
+                else:
+                    calc_scf_config = sp_scf_config
                 calc_solvent_name = sp_solvent_name
                 calc_solvent_model = sp_solvent_model
                 calc_solvent_map_path = sp_solvent_map_path
@@ -665,6 +702,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                     "spin": spin,
                     "optimizer_ase_config": context["optimizer_ase_dict"],
                     "constraints": context["constraints"],
+                    "profiling_enabled": profiling_enabled,
                 }
                 if calculation_mode == "single_point":
                     run_single_point_stage(stage_context, _update_foreground_queue)
@@ -695,6 +733,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                         run_dir=run_dir,
                         optimizer_mode=optimizer_mode,
                         multiplicity=multiplicity,
+                        profiling_enabled=profiling_enabled,
                     )
                     if mode_result.get("eigenvalue", 0.0) >= 0:
                         logging.warning(
@@ -706,6 +745,9 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                         {
                             "mode_vector": mode_result["mode"],
                             "mode_eigenvalue": mode_result.get("eigenvalue"),
+                            "mode_profiling": mode_result.get("profiling")
+                            if profiling_enabled
+                            else None,
                             "irc_steps": irc_steps,
                             "irc_step_size": irc_step_size,
                             "irc_force_threshold": irc_force_threshold,
