@@ -46,6 +46,12 @@ from .utils import (
 
 
 def prepare_run_context(args, config: RunConfig, config_raw) -> RunContext:
+    def _env_truthy(name: str) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return False
+        return value.strip().lower() in ("1", "true", "yes", "on")
+
     config_dict = config.to_dict()
     calculation_mode = _normalize_calculation_mode(config.calculation_mode)
     basis = config.basis
@@ -100,6 +106,25 @@ def prepare_run_context(args, config: RunConfig, config_raw) -> RunContext:
     thread_count = config.threads if config.threads is not None else DEFAULT_THREAD_COUNT
     memory_gb = config.memory_gb
     verbose = bool(config.verbose)
+    io_config = config.io
+    io_write_interval_steps = (
+        io_config.write_interval_steps
+        if io_config and io_config.write_interval_steps is not None
+        else 5
+    )
+    io_write_interval_seconds = (
+        io_config.write_interval_seconds
+        if io_config and io_config.write_interval_seconds is not None
+        else 5.0
+    )
+    scan_write_interval_points = (
+        io_config.scan_write_interval_points
+        if io_config and io_config.scan_write_interval_points is not None
+        else 1
+    )
+    profiling_enabled = bool(getattr(args, "profile", False)) or _env_truthy(
+        "DFTFLOW_PROFILE"
+    )
     resume_dir = getattr(args, "resume", None)
     run_dir = args.run_dir or resume_dir or create_run_directory()
     os.makedirs(run_dir, exist_ok=True)
@@ -209,6 +234,10 @@ def prepare_run_context(args, config: RunConfig, config_raw) -> RunContext:
         "thread_count": thread_count,
         "memory_gb": memory_gb,
         "verbose": verbose,
+        "profiling_enabled": profiling_enabled,
+        "io_write_interval_steps": io_write_interval_steps,
+        "io_write_interval_seconds": io_write_interval_seconds,
+        "scan_write_interval_points": scan_write_interval_points,
         "run_dir": run_dir,
         "log_path": log_path,
         "scf_config": scf_config,

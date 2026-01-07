@@ -4,8 +4,10 @@ import csv
 import itertools
 import json
 import logging
+import math
 import os
 import time
+import traceback
 from datetime import datetime
 
 from ase_backend import _run_ase_optimizer
@@ -42,7 +44,7 @@ SCAN_EXECUTORS = ("serial", "local", "manifest")
 
 def _normalize_scan_executor(value):
     if not value:
-        return "serial"
+        return "local"
     normalized = str(value).strip().lower()
     if normalized not in SCAN_EXECUTORS:
         raise ValueError(
@@ -53,15 +55,81 @@ def _normalize_scan_executor(value):
     return normalized
 
 
-def _resolve_scan_max_workers(scan_config, total_points):
+def _resolve_scan_worker_settings(scan_config, total_points, thread_count):
+    cpu_count = os.cpu_count() or 1
+    threads_per_worker = scan_config.get("threads_per_worker") if scan_config else None
+    if threads_per_worker is None:
+        threads_per_worker = thread_count if thread_count else 1
+    if not isinstance(threads_per_worker, int) or isinstance(threads_per_worker, bool):
+        raise ValueError("scan.threads_per_worker must be a positive integer.")
+    if threads_per_worker < 1:
+        raise ValueError("scan.threads_per_worker must be a positive integer.")
+    if threads_per_worker > cpu_count:
+        logging.warning(
+            "scan.threads_per_worker=%s exceeds CPU count %s; clamping to %s.",
+            threads_per_worker,
+            cpu_count,
+            cpu_count,
+        )
+        threads_per_worker = cpu_count
     max_workers = scan_config.get("max_workers") if scan_config else None
     if max_workers is None:
-        max_workers = os.cpu_count() or 1
+        max_workers = max(1, cpu_count // threads_per_worker)
+    if not isinstance(max_workers, int) or isinstance(max_workers, bool):
+        raise ValueError("scan.max_workers must be a positive integer.")
     if max_workers < 1:
         raise ValueError("scan.max_workers must be a positive integer.")
     if total_points:
-        return min(max_workers, total_points)
-    return max_workers
+        max_workers = min(max_workers, total_points)
+    max_parallel = max(1, cpu_count // threads_per_worker)
+    if max_workers > max_parallel:
+        logging.warning(
+            "scan.max_workers=%s with threads_per_worker=%s oversubscribes CPU (%s); "
+            "using %s workers.",
+            max_workers,
+            threads_per_worker,
+            cpu_count,
+            max_parallel,
+        )
+        max_workers = max_parallel
+    return max_workers, threads_per_worker
+
+
+def _resolve_scan_threads_per_worker(scan_config, thread_count):
+    threads_per_worker = scan_config.get("threads_per_worker") if scan_config else None
+    if threads_per_worker is None:
+        threads_per_worker = thread_count if thread_count else 1
+    if not isinstance(threads_per_worker, int) or isinstance(threads_per_worker, bool):
+        raise ValueError("scan.threads_per_worker must be a positive integer.")
+    if threads_per_worker < 1:
+        raise ValueError("scan.threads_per_worker must be a positive integer.")
+    return threads_per_worker
+
+
+def _resolve_scan_batch_size(scan_config, total_points, max_workers):
+    batch_size = scan_config.get("batch_size") if scan_config else None
+    if batch_size is None:
+        if not total_points or not max_workers:
+            return 1
+        target = math.ceil(total_points / (max_workers * 4))
+        return max(1, min(25, target))
+    if not isinstance(batch_size, int) or isinstance(batch_size, bool):
+        raise ValueError("scan.batch_size must be a positive integer.")
+    if batch_size < 1:
+        raise ValueError("scan.batch_size must be a positive integer.")
+    if total_points:
+        return min(batch_size, total_points)
+    return batch_size
+
+
+def _build_scan_batches(scan_points, batch_size):
+    batches = []
+    for start in range(0, len(scan_points), batch_size):
+        batch = []
+        for index in range(start, min(start + batch_size, len(scan_points))):
+            batch.append((index, scan_points[index]))
+        batches.append(batch)
+    return batches
 
 
 def _scan_point_dir(scan_dir, index):
@@ -168,6 +236,7 @@ def _run_scan_point(
     memory_mb,
     thread_count,
     parallel,
+    profiling_enabled=False,
 ):
     from ase.io import read as ase_read
     from ase.io import write as ase_write
@@ -197,13 +266,14 @@ def _run_scan_point(
             label=f"scan point {index}",
         )
     n_steps = None
+    optimizer_profile = None
     if scan_mode == "optimization":
         output_xyz_path = resolve_run_path(
             scan_dir, f"scan_{index:03d}_optimized.xyz"
         )
         scan_constraints = _build_scan_constraints(dimensions, values)
         merged_constraints = _merge_constraints(constraints, scan_constraints)
-        n_steps = _run_ase_optimizer(
+        opt_result = _run_ase_optimizer(
             input_xyz_path,
             output_xyz_path,
             point_run_dir,
@@ -222,7 +292,10 @@ def _run_scan_point(
             optimizer_ase_dict,
             optimizer_mode,
             merged_constraints,
+            profiling_enabled=profiling_enabled,
         )
+        n_steps = opt_result.get("n_steps")
+        optimizer_profile = opt_result.get("profiling") if profiling_enabled else None
         atoms = ase_read(output_xyz_path)
     atom_spec = _atoms_to_atom_spec(atoms)
     mol_scan = gto.M(
@@ -248,6 +321,7 @@ def _run_scan_point(
         optimizer_mode=optimizer_mode,
         multiplicity=multiplicity,
         log_override=False,
+        profiling_enabled=profiling_enabled,
     )
     point_result = {
         "index": index,
@@ -257,12 +331,91 @@ def _run_scan_point(
         "converged": scf_result.get("converged") if scf_result else None,
         "cycles": scf_result.get("cycles") if scf_result else None,
         "optimizer_steps": n_steps,
+        "profiling": {
+            "optimizer": optimizer_profile,
+            "single_point": scf_result.get("profiling") if scf_result else None,
+        }
+        if profiling_enabled
+        else None,
         "input_xyz": input_xyz_path,
         "output_xyz": output_xyz_path,
     }
     point_result_path = _scan_point_result_path(scan_dir, index)
     _write_point_result(point_result_path, point_result)
     return point_result
+
+
+def _run_scan_batch(
+    *,
+    batch_items,
+    dimensions,
+    scan_mode,
+    xyz_file,
+    seed_chkfile,
+    scan_dir,
+    run_dir,
+    charge,
+    spin,
+    multiplicity,
+    basis,
+    xc,
+    scf_config,
+    solvent_name,
+    solvent_model,
+    solvent_eps,
+    dispersion_model,
+    optimizer_mode,
+    optimizer_ase_dict,
+    constraints,
+    verbose,
+    memory_mb,
+    thread_count,
+    parallel,
+    profiling_enabled=False,
+):
+    results = []
+    errors = []
+    for index, values in batch_items:
+        point_run_dir = _scan_point_dir(scan_dir, index) if parallel else run_dir
+        try:
+            result = _run_scan_point(
+                index=index,
+                values=values,
+                dimensions=dimensions,
+                scan_mode=scan_mode,
+                xyz_file=xyz_file,
+                seed_chkfile=seed_chkfile,
+                scan_dir=scan_dir,
+                run_dir=point_run_dir,
+                charge=charge,
+                spin=spin,
+                multiplicity=multiplicity,
+                basis=basis,
+                xc=xc,
+                scf_config=scf_config,
+                solvent_name=solvent_name,
+                solvent_model=solvent_model,
+                solvent_eps=solvent_eps,
+                dispersion_model=dispersion_model,
+                optimizer_mode=optimizer_mode,
+                optimizer_ase_dict=optimizer_ase_dict,
+                constraints=constraints,
+                verbose=verbose,
+                memory_mb=memory_mb,
+                thread_count=thread_count,
+                parallel=parallel,
+                profiling_enabled=profiling_enabled,
+            )
+            results.append(result)
+        except Exception as exc:
+            errors.append(
+                {
+                    "index": index,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+            )
+    return {"results": results, "errors": errors}
 
 
 def _write_scan_manifest(
@@ -334,6 +487,7 @@ def run_scan_point_from_manifest(manifest_path, index):
     if target is None:
         raise ValueError(f"Scan point {index} not found in manifest.")
     settings = manifest.get("settings") or {}
+    thread_count = settings.get("threads_per_worker") or settings.get("thread_count") or 1
     return _run_scan_point(
         index=index,
         values=target.get("values") or [],
@@ -358,8 +512,9 @@ def run_scan_point_from_manifest(manifest_path, index):
         constraints=settings.get("constraints"),
         verbose=bool(settings.get("verbose")),
         memory_mb=settings.get("memory_mb"),
-        thread_count=settings.get("thread_count") or 1,
+        thread_count=thread_count,
         parallel=True,
+        profiling_enabled=bool(settings.get("profiling_enabled")),
     )
 
 
@@ -391,6 +546,8 @@ def run_scan_stage(
     multiplicity = molecule_context["multiplicity"]
     verbose = context["verbose"]
     thread_count = context["thread_count"]
+    profiling_enabled = bool(context.get("profiling_enabled"))
+    scan_write_interval_points = context.get("scan_write_interval_points", 1)
 
     scan_dir = resolve_run_path(run_dir, "scan")
     os.makedirs(scan_dir, exist_ok=True)
@@ -399,22 +556,36 @@ def run_scan_stage(
 
     scan_executor = _normalize_scan_executor(scan_config.get("executor"))
     scan_max_workers = None
-    if scan_executor == "local":
-        scan_max_workers = _resolve_scan_max_workers(scan_config, len(scan_points))
+    scan_batch_size = None
     manifest_setting = scan_config.get("manifest_file")
     if manifest_setting:
         scan_manifest_path = resolve_run_path(run_dir, manifest_setting)
     else:
         scan_manifest_path = resolve_run_path(scan_dir, "scan_manifest.json")
     scan_thread_count = thread_count
+    if scan_executor == "local":
+        scan_max_workers, scan_thread_count = _resolve_scan_worker_settings(
+            scan_config,
+            len(scan_points),
+            thread_count,
+        )
+        scan_batch_size = _resolve_scan_batch_size(
+            scan_config,
+            len(scan_points),
+            scan_max_workers,
+        )
+    elif scan_executor == "manifest":
+        scan_thread_count = _resolve_scan_threads_per_worker(scan_config, thread_count)
+
     if scan_executor in ("local", "manifest"):
-        if thread_count and thread_count != 1:
+        if thread_count and thread_count != scan_thread_count:
             logging.warning(
-                "Scan executor %s overrides thread_count to 1 for parallel execution.",
+                "Scan executor %s overrides thread_count=%s to threads_per_worker=%s.",
                 scan_executor,
+                thread_count,
+                scan_thread_count,
             )
-        thread_status = apply_thread_settings(1)
-        scan_thread_count = 1
+        thread_status = apply_thread_settings(scan_thread_count)
         effective_threads = thread_status.get("effective_threads")
         openmp_available = thread_status.get("openmp_available")
 
@@ -495,10 +666,12 @@ def run_scan_stage(
     scan_summary["scan"].update(
         {
             "executor": scan_executor,
-            "max_workers": scan_max_workers,
+            "max_workers": scan_max_workers if scan_executor == "local" else None,
             "manifest_file": scan_manifest_path if scan_executor == "manifest" else None,
             "point_result_dir": points_dir,
             "threads_per_worker": scan_thread_count,
+            "batch_size": scan_batch_size if scan_executor == "local" else None,
+            "write_interval_points": scan_write_interval_points,
         }
     )
     scan_summary["run_updated_at"] = datetime.now().isoformat()
@@ -536,8 +709,10 @@ def run_scan_stage(
     logging.info("Scan executor: %s", scan_executor)
     if scan_executor == "local":
         logging.info("Scan workers: %s", scan_max_workers)
+        if scan_batch_size:
+            logging.info("Scan batch size: %s", scan_batch_size)
     if scan_thread_count:
-        logging.info("Using threads: %s", scan_thread_count)
+        logging.info("Threads per worker: %s", scan_thread_count)
     if memory_mb:
         logging.info("Memory target: %s MB (PySCF max_memory)", memory_mb)
     if log_path:
@@ -549,6 +724,22 @@ def run_scan_stage(
 
     run_start = time.perf_counter()
     results_by_index = {}
+    last_scan_write = {"count": 0}
+
+    def _maybe_write_scan_results(force=False):
+        if not results_by_index:
+            return
+        completed = len(results_by_index)
+        if (
+            force
+            or scan_write_interval_points <= 1
+            or completed - last_scan_write["count"] >= scan_write_interval_points
+        ):
+            _write_scan_results(results_by_index, scan_result_path, scan_result_csv_path)
+            scan_summary["scan"]["completed_points"] = completed
+            scan_summary["run_updated_at"] = datetime.now().isoformat()
+            write_run_metadata(run_metadata_path, scan_summary)
+            last_scan_write["count"] = completed
     try:
         if scan_executor == "manifest":
             manifest_settings = {
@@ -569,6 +760,9 @@ def run_scan_stage(
                 "memory_mb": memory_mb,
                 "verbose": verbose,
                 "thread_count": scan_thread_count,
+                "threads_per_worker": scan_thread_count,
+                "write_interval_points": scan_write_interval_points,
+                "profiling_enabled": profiling_enabled,
             }
             _write_scan_manifest(
                 manifest_path=scan_manifest_path,
@@ -606,23 +800,23 @@ def run_scan_stage(
 
         if scan_executor == "local":
             error = None
+            batch_size = scan_batch_size or 1
+            batches = _build_scan_batches(scan_points, batch_size)
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=scan_max_workers
             ) as executor:
                 futures = {}
-                for index, values in enumerate(scan_points):
-                    point_run_dir = _scan_point_dir(scan_dir, index)
+                for batch in batches:
                     futures[
                         executor.submit(
-                            _run_scan_point,
-                            index=index,
-                            values=values,
+                            _run_scan_batch,
+                            batch_items=batch,
                             dimensions=dimensions,
                             scan_mode=scan_mode,
                             xyz_file=args.xyz_file,
                             seed_chkfile=scan_seed_chkfile,
                             scan_dir=scan_dir,
-                            run_dir=point_run_dir,
+                            run_dir=run_dir,
                             charge=charge,
                             spin=spin,
                             multiplicity=multiplicity,
@@ -640,23 +834,37 @@ def run_scan_stage(
                             memory_mb=memory_mb,
                             thread_count=scan_thread_count,
                             parallel=True,
+                            profiling_enabled=profiling_enabled,
                         )
-                    ] = index
+                    ] = batch
                 for future in concurrent.futures.as_completed(futures):
                     try:
-                        point_result = future.result()
+                        batch_result = future.result()
                     except Exception as exc:
-                        logging.exception("Scan point %s failed.", futures[future])
+                        logging.exception("Scan batch failed.")
                         error = exc
                         continue
-                    results_by_index[point_result["index"]] = point_result
-                    _write_scan_results(
-                        results_by_index, scan_result_path, scan_result_csv_path
-                    )
-                    scan_summary["scan"]["completed_points"] = len(results_by_index)
-                    scan_summary["run_updated_at"] = datetime.now().isoformat()
-                    write_run_metadata(run_metadata_path, scan_summary)
+                    for point_result in batch_result.get("results", []):
+                        results_by_index[point_result["index"]] = point_result
+                    for failure in batch_result.get("errors", []):
+                        logging.error(
+                            "Scan point %s failed: %s",
+                            failure.get("index"),
+                            failure.get("error"),
+                        )
+                        if failure.get("traceback"):
+                            logging.error("%s", failure.get("traceback"))
+                        if error is None:
+                            error = RuntimeError(
+                                "Scan point {index} failed: {error}".format(
+                                    index=failure.get("index"),
+                                    error=failure.get("error"),
+                                )
+                            )
+                    if batch_result.get("results") or batch_result.get("errors"):
+                        _maybe_write_scan_results(force=bool(batch_result.get("errors")))
             if error:
+                _maybe_write_scan_results(force=True)
                 raise error
         else:
             atoms_template = None
@@ -692,14 +900,10 @@ def run_scan_stage(
                     memory_mb=memory_mb,
                     thread_count=scan_thread_count,
                     parallel=False,
+                    profiling_enabled=profiling_enabled,
                 )
                 results_by_index[index] = point_result
-                _write_scan_results(
-                    results_by_index, scan_result_path, scan_result_csv_path
-                )
-                scan_summary["scan"]["completed_points"] = len(results_by_index)
-                scan_summary["run_updated_at"] = datetime.now().isoformat()
-                write_run_metadata(run_metadata_path, scan_summary)
+                _maybe_write_scan_results()
         results = _write_scan_results(
             results_by_index, scan_result_path, scan_result_csv_path
         )

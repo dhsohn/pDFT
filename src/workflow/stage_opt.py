@@ -68,6 +68,10 @@ def run_optimization_stage(
     thread_count = context["thread_count"]
     memory_gb = context["memory_gb"]
     verbose = context["verbose"]
+    profiling_enabled = bool(context.get("profiling_enabled"))
+    io_write_interval_steps = context.get("io_write_interval_steps", 5)
+    io_write_interval_seconds = context.get("io_write_interval_seconds", 5.0)
+    freq_scf_config = context.get("freq_scf_config") or context["sp_scf_config"]
     run_dir = context["run_dir"]
     log_path = context["log_path"]
     optimized_xyz_path = context["optimized_xyz_path"]
@@ -119,7 +123,7 @@ def run_optimization_stage(
                 mol,
                 context["sp_basis"],
                 context["sp_xc"],
-                context["sp_scf_config"],
+                freq_scf_config,
                 context["sp_solvent_model"] if context["sp_solvent_name"] else None,
                 context["sp_solvent_name"],
                 context["sp_eps"],
@@ -364,9 +368,15 @@ def run_optimization_stage(
         n_steps["value"] += 1
         step_value = n_steps["value"]
         now = time.monotonic()
-        should_write = (step_value - last_metadata_write["step"] >= 5) or (
-            now - last_metadata_write["time"] >= 5.0
-        )
+        should_write = False
+        if io_write_interval_steps:
+            should_write = (
+                step_value - last_metadata_write["step"] >= io_write_interval_steps
+            )
+        if not should_write and io_write_interval_seconds is not None:
+            should_write = (
+                now - last_metadata_write["time"] >= io_write_interval_seconds
+            )
         if should_write:
             optimizer = _args[0] if _args else None
             atoms = getattr(optimizer, "atoms", None) if optimizer is not None else None
@@ -384,7 +394,7 @@ def run_optimization_stage(
             if os.path.abspath(args.xyz_file) != os.path.abspath(input_xyz_path):
                 shutil.copy2(args.xyz_file, input_xyz_path)
         ensure_parent_dir(output_xyz_path)
-        n_steps_value = _run_ase_optimizer(
+        opt_result = _run_ase_optimizer(
             input_xyz_path,
             output_xyz_path,
             run_dir,
@@ -403,8 +413,14 @@ def run_optimization_stage(
             optimizer_ase_dict,
             optimizer_mode,
             context["constraints"],
+            profiling_enabled=profiling_enabled,
             step_callback=_step_callback,
         )
+        n_steps_value = opt_result.get("n_steps")
+        if profiling_enabled and opt_result.get("profiling"):
+            optimization_metadata.setdefault("profiling", {})["optimizer"] = opt_result.get(
+                "profiling"
+            )
         optimized_atom_spec, _, _, _ = load_xyz(output_xyz_path)
         mol_optimized = gto.M(
             atom=optimized_atom_spec,
@@ -497,7 +513,7 @@ def run_optimization_stage(
                 mol_optimized,
                 context["sp_basis"],
                 context["sp_xc"],
-                context["sp_scf_config"],
+                freq_scf_config,
                 context["sp_solvent_model"] if context["sp_solvent_name"] else None,
                 context["sp_solvent_name"],
                 context["sp_eps"],
@@ -511,6 +527,7 @@ def run_optimization_stage(
                 optimizer_mode=optimizer_mode,
                 multiplicity=multiplicity,
                 ts_quality=context.get("ts_quality"),
+                profiling_enabled=profiling_enabled,
             )
             last_scf_energy = frequency_result.get("energy")
             last_scf_converged = frequency_result.get("converged")
@@ -538,7 +555,7 @@ def run_optimization_stage(
                 "versions": _frequency_versions(),
                 "basis": context["sp_basis"],
                 "xc": context["sp_xc"],
-                "scf": context["sp_scf_config"],
+                "scf": freq_scf_config,
                 "solvent": context["sp_solvent_name"],
                 "solvent_model": context["sp_solvent_model"]
                 if context["sp_solvent_name"]
@@ -547,6 +564,7 @@ def run_optimization_stage(
                 "dispersion": context["freq_dispersion_model"],
                 "dispersion_mode": context["freq_dispersion_mode"],
                 "dispersion_step": context.get("freq_dispersion_step"),
+                "profiling": frequency_result.get("profiling"),
                 "thermochemistry": _thermochemistry_payload(
                     context["thermo"], frequency_result.get("thermochemistry")
                 ),
@@ -566,7 +584,7 @@ def run_optimization_stage(
                 "versions": _frequency_versions(),
                 "basis": context["sp_basis"],
                 "xc": context["sp_xc"],
-                "scf": context["sp_scf_config"],
+                "scf": freq_scf_config,
                 "solvent": context["sp_solvent_name"],
                 "solvent_model": context["sp_solvent_model"]
                 if context["sp_solvent_name"]
@@ -741,6 +759,7 @@ def run_optimization_stage(
                     run_dir=run_dir,
                     optimizer_mode=optimizer_mode,
                     multiplicity=multiplicity,
+                    profiling_enabled=profiling_enabled,
                 )
                 if mode_result.get("eigenvalue", 0.0) >= 0:
                     logging.warning(
@@ -748,6 +767,7 @@ def run_optimization_stage(
                         "structure may not be a first-order saddle point.",
                         mode_result.get("eigenvalue", 0.0),
                     )
+                mode_profiling = mode_result.get("profiling") if profiling_enabled else None
                 irc_result = _run_ase_irc(
                     output_xyz_path,
                     run_dir,
@@ -770,6 +790,7 @@ def run_optimization_stage(
                     irc_steps,
                     irc_step_size,
                     irc_force_threshold,
+                    profiling_enabled=profiling_enabled,
                 )
                 irc_payload = {
                     "status": "completed",
@@ -781,6 +802,12 @@ def run_optimization_stage(
                     "force_threshold": irc_force_threshold,
                     "mode_eigenvalue": mode_result.get("eigenvalue"),
                     "profile": irc_result.get("profile", []),
+                    "profiling": {
+                        "mode": mode_profiling,
+                        "irc": irc_result.get("profiling"),
+                    }
+                    if profiling_enabled
+                    else None,
                 }
                 irc_payload["assessment"] = _evaluate_irc_profile(
                     irc_payload["profile"],
@@ -820,6 +847,7 @@ def run_optimization_stage(
                 run_dir=run_dir,
                 optimizer_mode=optimizer_mode,
                 multiplicity=multiplicity,
+                profiling_enabled=profiling_enabled,
             )
             final_sp_energy = sp_result["energy"]
             final_sp_converged = sp_result["converged"]
@@ -829,6 +857,10 @@ def run_optimization_stage(
             optimization_metadata["single_point"]["dispersion_info"] = sp_result.get(
                 "dispersion"
             )
+            if profiling_enabled and sp_result.get("profiling"):
+                optimization_metadata["single_point"]["profiling"] = sp_result.get(
+                    "profiling"
+                )
             if final_sp_cycles is None:
                 final_sp_cycles = parse_single_point_cycle_count(log_path)
         elif single_point_enabled:

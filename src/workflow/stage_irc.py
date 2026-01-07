@@ -12,6 +12,8 @@ def run_irc_stage(stage_context, queue_update_fn):
     logging.info("Starting IRC calculation...")
     run_start = stage_context["run_start"]
     calculation_metadata = stage_context["metadata"]
+    profiling_enabled = bool(stage_context.get("profiling_enabled"))
+    mode_profiling = stage_context.get("mode_profiling")
     try:
         irc_result = _run_ase_irc(
             stage_context["input_xyz"],
@@ -35,6 +37,7 @@ def run_irc_stage(stage_context, queue_update_fn):
             stage_context["irc_steps"],
             stage_context["irc_step_size"],
             stage_context["irc_force_threshold"],
+            profiling_enabled=profiling_enabled,
         )
         irc_payload = {
             "status": "completed",
@@ -47,6 +50,12 @@ def run_irc_stage(stage_context, queue_update_fn):
             "mode_eigenvalue": stage_context.get("mode_eigenvalue"),
             "profile": irc_result.get("profile", []),
             "profile_csv_file": stage_context["irc_profile_csv_path"],
+            "profiling": {
+                "mode": mode_profiling,
+                "irc": irc_result.get("profiling"),
+            }
+            if profiling_enabled
+            else None,
         }
         irc_payload["assessment"] = _evaluate_irc_profile(irc_payload["profile"])
         with open(stage_context["irc_output_path"], "w", encoding="utf-8") as handle:
@@ -100,6 +109,10 @@ def run_irc_stage(stage_context, queue_update_fn):
                     }
                 )
         calculation_metadata["irc"] = irc_payload
+        if profiling_enabled and irc_payload.get("profiling") is not None:
+            calculation_metadata.setdefault("profiling", {})["irc"] = irc_payload.get(
+                "profiling"
+            )
         energy_summary = None
         if irc_payload["profile"]:
             energy_summary = {

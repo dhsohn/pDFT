@@ -25,6 +25,10 @@ class RunContext(TypedDict):
     thread_count: int | None
     memory_gb: float | None
     verbose: bool
+    profiling_enabled: NotRequired[bool]
+    io_write_interval_steps: NotRequired[int]
+    io_write_interval_seconds: NotRequired[float | None]
+    scan_write_interval_points: NotRequired[int]
     run_dir: str
     log_path: str
     scf_config: dict[str, Any]
@@ -59,6 +63,8 @@ class RunContext(TypedDict):
     freq_dispersion_mode: NotRequired[str]
     freq_dispersion_model: NotRequired[str | None]
     freq_dispersion_step: NotRequired[float | None]
+    freq_scf_config: NotRequired[dict[str, Any]]
+    frequency_use_chkfile: NotRequired[bool]
 
 
 class MoleculeContext(TypedDict):

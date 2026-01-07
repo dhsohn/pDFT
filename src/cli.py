@@ -158,6 +158,11 @@ def build_parser():
         action="store_true",
         help="Launch in the background queue (optional).",
     )
+    run_parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Record SCF/gradient/Hessian timing and cycle counts in metadata.",
+    )
     run_dir_group = run_parser.add_mutually_exclusive_group()
     run_dir_group.add_argument(
         "--run-dir",

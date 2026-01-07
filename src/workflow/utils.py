@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -62,7 +63,7 @@ def _frequency_units():
     }
 
 
-def _resolve_scf_chkfile(scf_config, run_dir):
+def _resolve_scf_chkfile(scf_config, run_dir, force=False):
     if scf_config is None:
         return None
     if not isinstance(scf_config, dict):
@@ -70,7 +71,12 @@ def _resolve_scf_chkfile(scf_config, run_dir):
     if "chkfile" in scf_config:
         chkfile = scf_config.get("chkfile")
         if not chkfile:
-            return None
+            if not force:
+                return None
+            if not run_dir:
+                return None
+            chkfile = DEFAULT_SCF_CHKFILE
+            scf_config["chkfile"] = chkfile
     else:
         if not run_dir:
             return None
@@ -79,6 +85,36 @@ def _resolve_scf_chkfile(scf_config, run_dir):
     resolved = resolve_run_path(run_dir, chkfile) if run_dir else chkfile
     scf_config["chkfile"] = resolved
     return resolved
+
+
+def _prepare_frequency_scf_config(scf_config, run_dir, use_chkfile):
+    if scf_config is None:
+        config = {}
+    else:
+        config = copy.deepcopy(scf_config)
+    if use_chkfile:
+        _resolve_scf_chkfile(config, run_dir, force=True)
+    else:
+        config["chkfile"] = None
+    return config
+
+
+def _recommend_density_fit(scf_config, mol, label=None, atom_threshold=50):
+    if scf_config is None or not isinstance(scf_config, dict):
+        return
+    extra = scf_config.get("extra") or {}
+    if "density_fit" in extra:
+        return
+    atom_count = getattr(mol, "natm", None)
+    if atom_count is None or atom_count < atom_threshold:
+        return
+    prefix = f"{label} " if label else ""
+    logging.info(
+        "%sLarge system detected (%s atoms); consider scf.extra.density_fit: autoaux "
+        "for faster SCF/gradient/Hessian.",
+        prefix,
+        atom_count,
+    )
 
 
 def _warn_missing_chkfile(resume_label, chkfile_path):
@@ -158,6 +194,8 @@ def _normalize_frequency_dispersion_mode(mode_value):
     normalized = re.sub(r"[\s_\-]+", "", str(mode_value)).lower()
     if normalized in ("none", "no", "off", "false"):
         return "none"
+    if normalized in ("energy", "energyonly", "onlyenergy"):
+        return "energy"
     if normalized in (
         "numerical",
         "numeric",
@@ -167,7 +205,7 @@ def _normalize_frequency_dispersion_mode(mode_value):
     ):
         return "numerical"
     raise ValueError(
-        "Unsupported frequency dispersion mode '{value}'. Use 'numerical' or 'none'.".format(
+        "Unsupported frequency dispersion mode '{value}'. Use 'numerical', 'energy', or 'none'.".format(
             value=mode_value
         )
     )

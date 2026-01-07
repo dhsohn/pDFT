@@ -11,6 +11,7 @@ def run_single_point_stage(stage_context, queue_update_fn):
     logging.info("Starting single-point energy calculation...")
     run_start = stage_context["run_start"]
     calculation_metadata = stage_context["metadata"]
+    profiling_enabled = bool(stage_context.get("profiling_enabled"))
     try:
         sp_result = compute_single_point_energy(
             stage_context["mol"],
@@ -27,8 +28,13 @@ def run_single_point_stage(stage_context, queue_update_fn):
             optimizer_mode=stage_context["optimizer_mode"],
             multiplicity=stage_context["multiplicity"],
             log_override=False,
+            profiling_enabled=profiling_enabled,
         )
         calculation_metadata["dispersion_info"] = sp_result.get("dispersion")
+        if profiling_enabled and sp_result.get("profiling") is not None:
+            calculation_metadata.setdefault("profiling", {})["single_point"] = sp_result.get(
+                "profiling"
+            )
         energy = sp_result.get("energy")
         sp_converged = sp_result.get("converged")
         sp_cycles = sp_result.get("cycles")

@@ -36,6 +36,7 @@ def run_frequency_stage(stage_context, queue_update_fn):
             optimizer_mode=stage_context["optimizer_mode"],
             multiplicity=stage_context["multiplicity"],
             ts_quality=stage_context.get("ts_quality"),
+            profiling_enabled=bool(stage_context.get("profiling_enabled")),
             log_override=False,
         )
         imaginary_check = frequency_result.get("imaginary_check") or {}
@@ -70,6 +71,7 @@ def run_frequency_stage(stage_context, queue_update_fn):
             "dispersion": stage_context["calc_dispersion_model"],
             "dispersion_mode": stage_context["freq_dispersion_mode"],
             "dispersion_step": stage_context.get("freq_dispersion_step"),
+            "profiling": frequency_result.get("profiling"),
             "thermochemistry": _thermochemistry_payload(
                 stage_context["thermo"], frequency_result.get("thermochemistry")
             ),
@@ -81,6 +83,10 @@ def run_frequency_stage(stage_context, queue_update_fn):
             json.dump(frequency_payload, handle, indent=2)
         calculation_metadata["frequency"] = frequency_payload
         calculation_metadata["dispersion_info"] = frequency_result.get("dispersion")
+        if frequency_result.get("profiling") is not None:
+            calculation_metadata.setdefault("profiling", {})["frequency"] = frequency_result.get(
+                "profiling"
+            )
         energy = frequency_result.get("energy")
         sp_converged = frequency_result.get("converged")
         sp_cycles = frequency_result.get("cycles")

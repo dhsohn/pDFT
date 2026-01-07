@@ -77,6 +77,8 @@ RUN_CONFIG_EXAMPLES = {
         "\"scf\": {\"max_cycle\": 200, \"conv_tol\": 1e-7, \"diis\": 8, "
         "\"chkfile\": \"scf.chk\", \"extra\": {\"grids\": {\"level\": 3}}}"
     ),
+    "scf.retry_preset": "\"scf\": {\"retry_preset\": \"stable\"}",
+    "scf.diis_preset": "\"scf\": {\"diis_preset\": \"stable\"}",
     "single_point": (
         "\"single_point\": {\"basis\": \"def2-svp\", \"xc\": \"b3lyp\", "
         "\"solvent\": \"water\", \"dispersion\": \"d3bj\"}"
@@ -88,6 +90,10 @@ RUN_CONFIG_EXAMPLES = {
     "frequency": "\"frequency\": {\"dispersion\": \"numerical\", \"dispersion_model\": \"d3bj\"}",
     "freq": "\"freq\": {\"dispersion\": \"numerical\", \"dispersion_model\": \"d3bj\"}",
     "frequency.dispersion_step": "\"frequency\": {\"dispersion_step\": 0.005}",
+    "frequency.use_chkfile": "\"frequency\": {\"use_chkfile\": false}",
+    "io.write_interval_steps": "\"io\": {\"write_interval_steps\": 10}",
+    "io.write_interval_seconds": "\"io\": {\"write_interval_seconds\": 30}",
+    "io.scan_write_interval_points": "\"io\": {\"scan_write_interval_points\": 5}",
     "thermo": "\"thermo\": {\"T\": 298.15, \"P\": 1.0, \"unit\": \"atm\"}",
     "constraints": (
         "\"constraints\": {\"bonds\": [{\"i\": 0, \"j\": 1, \"length\": 1.10}], "
@@ -98,6 +104,10 @@ RUN_CONFIG_EXAMPLES = {
         "\"scan\": {\"type\": \"bond\", \"i\": 0, \"j\": 1, \"start\": 1.0, "
         "\"end\": 2.0, \"step\": 0.1, \"mode\": \"optimization\"}"
     ),
+    "scan.executor": "\"scan\": {\"executor\": \"local\"}",
+    "scan.max_workers": "\"scan\": {\"executor\": \"local\", \"max_workers\": 4}",
+    "scan.threads_per_worker": "\"scan\": {\"threads_per_worker\": 2}",
+    "scan.batch_size": "\"scan\": {\"batch_size\": 10}",
     "ts_quality": (
         "\"ts_quality\": {\"expected_imaginary_count\": 1, "
         "\"imaginary_frequency_min_abs\": 50.0, \"imaginary_frequency_max_abs\": 1500.0, "
@@ -132,6 +142,8 @@ class SCFConfig(ConfigModel):
     level_shift: float | None = None
     damping: float | None = None
     diis: bool | int | None = None
+    diis_preset: str | None = None
+    retry_preset: str | None = None
     chkfile: str | None = None
     force_restricted: bool | None = None
     force_unrestricted: bool | None = None
@@ -199,6 +211,7 @@ class FrequencyConfig(ConfigModel):
     dispersion: str | None = None
     dispersion_model: str | None = None
     dispersion_step: float | None = None
+    use_chkfile: bool | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "FrequencyConfig | None":
@@ -250,6 +263,19 @@ class ThermoConfig(ConfigModel):
         return cls.model_validate(data)
 
 
+class IOConfig(ConfigModel):
+    write_interval_steps: int | None = None
+    write_interval_seconds: float | None = None
+    scan_write_interval_points: int | None = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "IOConfig | None":
+        data = _ensure_dict(data, "io")
+        if data is None:
+            return None
+        return cls.model_validate(data)
+
+
 class RunConfig(ConfigModel):
     threads: int | None = None
     memory_gb: float | None = None
@@ -285,6 +311,7 @@ class RunConfig(ConfigModel):
     irc: IrcConfig | None = None
     ts_quality: TSQualityConfig | None = None
     thermo: ThermoConfig | None = None
+    io: IOConfig | None = None
     constraints: dict[str, Any] | None = None
     scan: dict[str, Any] | None = None
     scan2d: dict[str, Any] | None = None
@@ -550,6 +577,35 @@ def validate_run_config(config):
             return "scan"
         return None
 
+    scf_retry_presets = {"fast", "default", "stable", "off"}
+    scf_retry_aliases = {
+        "conservative": "fast",
+        "aggressive": "stable",
+        "robust": "stable",
+        "none": "off",
+        "disabled": "off",
+    }
+    diis_presets = {"fast", "default", "stable", "off"}
+    diis_aliases = {
+        "conservative": "fast",
+        "aggressive": "stable",
+        "robust": "stable",
+        "none": "off",
+        "disabled": "off",
+    }
+
+    def normalize_preset(value, aliases, allowed, label):
+        normalized = re.sub(r"[\s_\-]+", "", str(value)).lower()
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in allowed:
+            allowed_values = ", ".join(sorted(allowed))
+            raise ValueError(
+                "Config '{label}' must be one of: {values}.".format(
+                    label=label, values=allowed_values
+                )
+            )
+        return normalized
+
     def _validate_smd_solvent_support(solvent_model, solvent, field_label):
         if not solvent_model:
             return
@@ -614,6 +670,22 @@ def validate_run_config(config):
             if not is_int(max_workers) or max_workers < 1:
                 raise ValueError(
                     "Config '{name}.max_workers' must be a positive integer.".format(
+                        name=name
+                    )
+                )
+        threads_per_worker = scan.get("threads_per_worker")
+        if threads_per_worker is not None:
+            if not is_int(threads_per_worker) or threads_per_worker < 1:
+                raise ValueError(
+                    "Config '{name}.threads_per_worker' must be a positive integer.".format(
+                        name=name
+                    )
+                )
+        batch_size = scan.get("batch_size")
+        if batch_size is not None:
+            if not is_int(batch_size) or batch_size < 1:
+                raise ValueError(
+                    "Config '{name}.batch_size' must be a positive integer.".format(
                         name=name
                     )
                 )
@@ -850,6 +922,8 @@ def validate_run_config(config):
             "level_shift": (is_number, "Config '{name}' must be a number (int or float)."),
             "damping": (is_number, "Config '{name}' must be a number (int or float)."),
             "diis": (is_diis, "Config '{name}' must be a boolean or integer."),
+            "diis_preset": (is_str, "Config '{name}' must be a string."),
+            "retry_preset": (is_str, "Config '{name}' must be a string."),
             "chkfile": (is_str, "Config '{name}' must be a string path."),
             "force_restricted": (is_bool, "Config '{name}' must be a boolean."),
             "force_unrestricted": (is_bool, "Config '{name}' must be a boolean."),
@@ -857,6 +931,20 @@ def validate_run_config(config):
         }
         _validate_fields(config["scf"], scf_validation_rules, prefix="scf.")
         _validate_scf_extra(config["scf"].get("extra"), "scf")
+        if config["scf"].get("retry_preset") is not None:
+            normalize_preset(
+                config["scf"].get("retry_preset"),
+                scf_retry_aliases,
+                scf_retry_presets,
+                "scf.retry_preset",
+            )
+        if config["scf"].get("diis_preset") is not None:
+            normalize_preset(
+                config["scf"].get("diis_preset"),
+                diis_aliases,
+                diis_presets,
+                "scf.diis_preset",
+            )
         if config["scf"].get("force_restricted") and config["scf"].get("force_unrestricted"):
             raise ValueError(
                 "Config 'scf' must not set both 'force_restricted' and 'force_unrestricted'."
@@ -887,6 +975,8 @@ def validate_run_config(config):
                 "level_shift": (is_number, "Config '{name}' must be a number (int or float)."),
                 "damping": (is_number, "Config '{name}' must be a number (int or float)."),
                 "diis": (is_diis, "Config '{name}' must be a boolean or integer."),
+                "diis_preset": (is_str, "Config '{name}' must be a string."),
+                "retry_preset": (is_str, "Config '{name}' must be a string."),
                 "chkfile": (is_str, "Config '{name}' must be a string path."),
                 "force_restricted": (is_bool, "Config '{name}' must be a boolean."),
                 "force_unrestricted": (is_bool, "Config '{name}' must be a boolean."),
@@ -894,6 +984,20 @@ def validate_run_config(config):
             }
             _validate_fields(config["single_point"]["scf"], scf_validation_rules, prefix="single_point.scf.")
             _validate_scf_extra(config["single_point"]["scf"].get("extra"), "single_point.scf")
+            if config["single_point"]["scf"].get("retry_preset") is not None:
+                normalize_preset(
+                    config["single_point"]["scf"].get("retry_preset"),
+                    scf_retry_aliases,
+                    scf_retry_presets,
+                    "single_point.scf.retry_preset",
+                )
+            if config["single_point"]["scf"].get("diis_preset") is not None:
+                normalize_preset(
+                    config["single_point"]["scf"].get("diis_preset"),
+                    diis_aliases,
+                    diis_presets,
+                    "single_point.scf.diis_preset",
+                )
             if (
                 config["single_point"]["scf"].get("force_restricted")
                 and config["single_point"]["scf"].get("force_unrestricted")
@@ -913,6 +1017,7 @@ def validate_run_config(config):
                     is_positive_number,
                     "Config '{name}' must be a positive number.",
                 ),
+                "use_chkfile": (is_bool, "Config '{name}' must be a boolean."),
             }
             _validate_fields(config[frequency_key], frequency_rules, prefix=f"{frequency_key}.")
     if "ts_quality" in config and config["ts_quality"] is not None:
@@ -1040,6 +1145,24 @@ def validate_run_config(config):
                 "Config 'thermo.unit' must be one of: atm, bar, Pa. "
                 "Example: \"thermo\": {\"T\": 298.15, \"P\": 1.0, \"unit\": \"atm\"}."
             )
+    if "io" in config and config["io"] is not None:
+        if not isinstance(config["io"], dict):
+            raise ValueError("Config 'io' must be an object.")
+        io_rules = {
+            "write_interval_steps": (
+                is_positive_int,
+                "Config '{name}' must be a positive integer.",
+            ),
+            "write_interval_seconds": (
+                is_positive_number,
+                "Config '{name}' must be a positive number.",
+            ),
+            "scan_write_interval_points": (
+                is_positive_int,
+                "Config '{name}' must be a positive integer.",
+            ),
+        }
+        _validate_fields(config["io"], io_rules, prefix="io.")
     if "constraints" in config and config["constraints"] is not None:
         if not isinstance(config["constraints"], dict):
             raise ValueError("Config 'constraints' must be an object.")

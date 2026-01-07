@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 from functools import lru_cache
 
 from run_opt_config import (
@@ -221,8 +222,14 @@ def apply_scf_settings(mf, scf_config, *, apply_density_fit=True):
     max_cycle = scf_config.get("max_cycle")
     conv_tol = scf_config.get("conv_tol")
     diis = scf_config.get("diis")
+    diis_preset = scf_config.get("diis_preset")
     level_shift = scf_config.get("level_shift")
     damping = scf_config.get("damping")
+
+    if diis is None and diis_preset is not None:
+        preset_key = _normalize_diis_preset(diis_preset)
+        diis = DIIS_PRESET_VALUES[preset_key]
+        applied["diis_preset"] = preset_key
 
     if max_cycle is not None:
         mf.max_cycle = int(max_cycle)
@@ -343,6 +350,68 @@ def _coerce_int(value):
         return None
 
 
+DIIS_PRESET_VALUES = {
+    "fast": 6,
+    "default": 8,
+    "stable": 12,
+    "off": False,
+}
+
+DIIS_PRESET_ALIASES = {
+    "conservative": "fast",
+    "aggressive": "stable",
+    "robust": "stable",
+    "none": "off",
+    "disabled": "off",
+}
+
+SCF_RETRY_PRESET_VALUES = {
+    "fast": (
+        {"level_shift": 0.3, "damping": 0.1, "max_cycle": 50},
+    ),
+    "default": (
+        {"level_shift": 0.5, "damping": 0.2, "max_cycle": 50},
+        {"level_shift": 1.0, "damping": 0.3, "max_cycle": 200},
+    ),
+    "stable": (
+        {"level_shift": 0.5, "damping": 0.2, "max_cycle": 50},
+        {"level_shift": 1.0, "damping": 0.3, "max_cycle": 200},
+        {"level_shift": 2.0, "damping": 0.4, "max_cycle": 400},
+    ),
+    "off": (),
+}
+
+SCF_RETRY_PRESET_ALIASES = {
+    "conservative": "fast",
+    "aggressive": "stable",
+    "robust": "stable",
+    "none": "off",
+    "disabled": "off",
+}
+
+
+def _normalize_diis_preset(value):
+    if value is None:
+        return None
+    normalized = re.sub(r"[\s_\-]+", "", str(value)).lower()
+    normalized = DIIS_PRESET_ALIASES.get(normalized, normalized)
+    if normalized not in DIIS_PRESET_VALUES:
+        allowed = ", ".join(sorted(DIIS_PRESET_VALUES))
+        raise ValueError(f"Invalid scf.diis_preset: {value!r}. Allowed: {allowed}.")
+    return normalized
+
+
+def _normalize_scf_retry_preset(value):
+    if value is None:
+        return "default"
+    normalized = re.sub(r"[\s_\-]+", "", str(value)).lower()
+    normalized = SCF_RETRY_PRESET_ALIASES.get(normalized, normalized)
+    if normalized not in SCF_RETRY_PRESET_VALUES:
+        allowed = ", ".join(sorted(SCF_RETRY_PRESET_VALUES))
+        raise ValueError(f"Invalid scf.retry_preset: {value!r}. Allowed: {allowed}.")
+    return normalized
+
+
 def _merge_scf_config(base_config, overrides):
     merged = dict(base_config or {})
     merged.update(overrides or {})
@@ -351,13 +420,13 @@ def _merge_scf_config(base_config, overrides):
 
 def _build_scf_retry_overrides(scf_config):
     base_config = scf_config or {}
+    preset = _normalize_scf_retry_preset(base_config.get("retry_preset"))
+    retry_targets = SCF_RETRY_PRESET_VALUES.get(preset, ())
+    if not retry_targets:
+        return []
     base_level = _coerce_float(base_config.get("level_shift"))
     base_damping = _coerce_float(base_config.get("damping"))
     base_max = _coerce_int(base_config.get("max_cycle"))
-    retry_targets = (
-        {"level_shift": 0.5, "damping": 0.2, "max_cycle": 50},
-        {"level_shift": 1.0, "damping": 0.3, "max_cycle": 200},
-    )
     retries = []
     for target in retry_targets:
         overrides = {}
@@ -639,6 +708,7 @@ def compute_single_point_energy(
     run_dir=None,
     optimizer_mode=None,
     multiplicity=None,
+    profiling_enabled=False,
     log_override=True,
 ):
     from ase import units
@@ -678,9 +748,13 @@ def compute_single_point_energy(
         mf_sp, _ = apply_scf_settings(mf_sp, scf_settings, apply_density_fit=False)
         return mf_sp
 
+    scf_start = time.perf_counter() if profiling_enabled else None
     energy, mf_sp, _ = _run_scf_with_retries(
         _build_mf_sp, scf_config, run_dir, "Single-point SCF"
     )
+    scf_seconds = None
+    if scf_start is not None:
+        scf_seconds = time.perf_counter() - scf_start
     dispersion_info = None
     if dispersion is not None:
         dispersion_settings = parse_dispersion_settings(
@@ -703,12 +777,18 @@ def compute_single_point_energy(
             "energy_ev": dispersion_energy_ev,
             "backend": dispersion_backend,
         }
-    return {
+    result = {
         "energy": energy,
         "converged": getattr(mf_sp, "converged", None),
         "cycles": extract_step_count(mf_sp),
         "dispersion": dispersion_info,
     }
+    if profiling_enabled:
+        result["profiling"] = {
+            "scf_seconds": scf_seconds,
+            "scf_cycles": extract_step_count(mf_sp),
+        }
+    return result
 
 
 DEFAULT_TS_IMAG_FREQ_MIN_ABS = 50.0
@@ -886,6 +966,7 @@ def compute_frequencies(
     optimizer_mode=None,
     multiplicity=None,
     ts_quality=None,
+    profiling_enabled=False,
     log_override=True,
 ):
     from ase import units
@@ -896,6 +977,16 @@ def compute_frequencies(
     from pyscf.hessian import thermo as pyscf_thermo
 
     xc = normalize_xc_functional(xc)
+    profiling = None
+    if profiling_enabled:
+        profiling = {
+            "scf_seconds": None,
+            "scf_cycles": None,
+            "hessian_seconds": None,
+            "dispersion_hessian_seconds": None,
+        }
+    if dispersion_hessian_mode == "none":
+        dispersion = None
     mol_freq = mol.copy()
     if basis:
         mol_freq.basis = basis
@@ -981,6 +1072,7 @@ def compute_frequencies(
         dispersion_calc, dispersion_backend = _build_dispersion_calculator(
             atoms, dispersion_settings
         )
+        atoms.calc = dispersion_calc
         dispersion_energy_ev = dispersion_calc.get_potential_energy(atoms=atoms)
         dispersion_energy_hartree = dispersion_energy_ev / units.Hartree
         dispersion_payload["energy_hartree"] = dispersion_energy_hartree
@@ -993,8 +1085,13 @@ def compute_frequencies(
         }
         if dispersion_hessian_mode == "numerical":
             step = dispersion_hessian_step if dispersion_hessian_step is not None else 0.005
+            dispersion_hessian_start = time.perf_counter() if profiling else None
             dispersion_hessian = _compute_dispersion_hessian(atoms, step)
-            dispersion_hessian *= (1.0 / units.Hartree) * (units.Bohr ** 2)
+            if dispersion_hessian_start is not None:
+                profiling["dispersion_hessian_seconds"] = (
+                    time.perf_counter() - dispersion_hessian_start
+                )
+            dispersion_hessian *= (1.0 / units.Hartree) / (units.Bohr ** 2)
             dispersion_payload["hessian"] = dispersion_hessian
             dispersion_info["hessian_step"] = step
         dispersion_payload["info"] = dispersion_info
@@ -1005,6 +1102,7 @@ def compute_frequencies(
         energy_value += dispersion_payload["energy_hartree"]
         return energy_value, dispersion_payload["info"], dispersion_payload["hessian"]
 
+    scf_start = time.perf_counter() if profiling else None
     energy, mf_freq, info = _run_scf_with_retries(
         lambda scf_settings: _build_mf_freq(
             apply_density_fit=True, scf_override=scf_settings
@@ -1013,18 +1111,32 @@ def compute_frequencies(
         run_dir,
         "Frequency SCF",
     )
+    if scf_start is not None:
+        profiling["scf_seconds"] = time.perf_counter() - scf_start
+        profiling["scf_cycles"] = extract_step_count(mf_freq)
     density_fit_applied = bool(info.get("density_fit_applied"))
     energy, dispersion_info, dispersion_hessian = _apply_dispersion(energy)
-    try:
-        if hasattr(mf_freq, "Hessian"):
-            hess = mf_freq.Hessian().kernel()
+
+    def _compute_hessian(mf_handle):
+        hess_start = time.perf_counter() if profiling else None
+        if hasattr(mf_handle, "Hessian"):
+            hess_value = mf_handle.Hessian().kernel()
         else:
-            hess = pyscf_hessian.Hessian(mf_freq).kernel()
+            hess_value = pyscf_hessian.Hessian(mf_handle).kernel()
+        if hess_start is None:
+            return hess_value, None
+        return hess_value, time.perf_counter() - hess_start
+
+    try:
+        hess, hess_seconds = _compute_hessian(mf_freq)
+        if hess_seconds is not None:
+            profiling["hessian_seconds"] = hess_seconds
     except Exception as exc:
         if density_fit_applied and is_density_fit_gradient_einsum_error(exc):
             logging.warning(
                 "Density-fitting Hessian failed; retrying without density fitting."
             )
+            scf_retry_start = time.perf_counter() if profiling else None
             energy, mf_freq, info = _run_scf_with_retries(
                 lambda scf_settings: _build_mf_freq(
                     apply_density_fit=False, scf_override=scf_settings
@@ -1033,12 +1145,20 @@ def compute_frequencies(
                 run_dir,
                 "Frequency SCF (no density fit)",
             )
+            if scf_retry_start is not None:
+                profiling["scf_seconds"] = (profiling["scf_seconds"] or 0.0) + (
+                    time.perf_counter() - scf_retry_start
+                )
+                retry_cycles = extract_step_count(mf_freq)
+                if retry_cycles is not None:
+                    profiling["scf_cycles"] = (profiling["scf_cycles"] or 0) + retry_cycles
             density_fit_applied = bool(info.get("density_fit_applied"))
             energy, dispersion_info, dispersion_hessian = _apply_dispersion(energy)
-            if hasattr(mf_freq, "Hessian"):
-                hess = mf_freq.Hessian().kernel()
-            else:
-                hess = pyscf_hessian.Hessian(mf_freq).kernel()
+            hess, hess_seconds = _compute_hessian(mf_freq)
+            if hess_seconds is not None:
+                profiling["hessian_seconds"] = (
+                    (profiling["hessian_seconds"] or 0.0) + hess_seconds
+                )
         else:
             raise
     if dispersion_hessian is not None:
@@ -1123,6 +1243,14 @@ def compute_frequencies(
         enthalpy_total_value = _to_scalar(enthalpy_total)
         gibbs_total_value = _to_scalar(gibbs_total)
         entropy_value = _to_scalar(entropy)
+        dispersion_energy_hartree = (
+            dispersion_info.get("energy_hartree") if dispersion_info else None
+        )
+        if dispersion_energy_hartree is not None:
+            if enthalpy_total_value is not None:
+                enthalpy_total_value += dispersion_energy_hartree
+            if gibbs_total_value is not None:
+                gibbs_total_value += dispersion_energy_hartree
         thermal_correction_enthalpy = None
         gibbs_correction = None
         gibbs_free_energy = None
@@ -1302,7 +1430,7 @@ def compute_frequencies(
             "allow_single_point": allow_single_point,
         }
 
-    return {
+    result = {
         "energy": energy,
         "converged": getattr(mf_freq, "converged", None),
         "cycles": extract_step_count(mf_freq),
@@ -1320,6 +1448,9 @@ def compute_frequencies(
         "dispersion": dispersion_info,
         "thermochemistry": thermochemistry,
     }
+    if profiling:
+        result["profiling"] = profiling
+    return result
 
 
 def compute_imaginary_mode(
@@ -1335,6 +1466,7 @@ def compute_imaginary_mode(
     run_dir=None,
     optimizer_mode=None,
     multiplicity=None,
+    profiling_enabled=False,
     log_override=True,
 ):
     try:
@@ -1346,6 +1478,13 @@ def compute_imaginary_mode(
     from pyscf import dft, hessian as pyscf_hessian
 
     xc = normalize_xc_functional(xc)
+    profiling = None
+    if profiling_enabled:
+        profiling = {
+            "scf_seconds": None,
+            "scf_cycles": None,
+            "hessian_seconds": None,
+        }
     mol_mode = mol.copy()
     if basis:
         mol_mode.basis = basis
@@ -1382,19 +1521,32 @@ def compute_imaginary_mode(
         return mf_mode, density_fit_applied
 
     def _run_scf(mf_mode):
+        scf_start = time.perf_counter() if profiling else None
         dm0, _ = apply_scf_checkpoint(mf_mode, scf_config, run_dir=run_dir)
         if dm0 is not None:
             mf_mode.kernel(dm0=dm0)
         else:
             mf_mode.kernel()
+        if scf_start is not None:
+            profiling["scf_seconds"] = (profiling["scf_seconds"] or 0.0) + (
+                time.perf_counter() - scf_start
+            )
+            cycles = extract_step_count(mf_mode)
+            if cycles is not None:
+                profiling["scf_cycles"] = (profiling["scf_cycles"] or 0) + cycles
 
     mf_mode, density_fit_applied = _build_mf_mode(apply_density_fit=True)
     _run_scf(mf_mode)
     try:
+        hess_start = time.perf_counter() if profiling else None
         if hasattr(mf_mode, "Hessian"):
             hess = mf_mode.Hessian().kernel()
         else:
             hess = pyscf_hessian.Hessian(mf_mode).kernel()
+        if hess_start is not None:
+            profiling["hessian_seconds"] = (profiling["hessian_seconds"] or 0.0) + (
+                time.perf_counter() - hess_start
+            )
     except Exception as exc:
         if density_fit_applied and is_density_fit_gradient_einsum_error(exc):
             logging.warning(
@@ -1402,15 +1554,23 @@ def compute_imaginary_mode(
             )
             mf_mode, _ = _build_mf_mode(apply_density_fit=False)
             _run_scf(mf_mode)
+            hess_start = time.perf_counter() if profiling else None
             if hasattr(mf_mode, "Hessian"):
                 hess = mf_mode.Hessian().kernel()
             else:
                 hess = pyscf_hessian.Hessian(mf_mode).kernel()
+            if hess_start is not None:
+                profiling["hessian_seconds"] = (profiling["hessian_seconds"] or 0.0) + (
+                    time.perf_counter() - hess_start
+                )
         else:
             raise
-    return _extract_imaginary_mode_from_hessian(
+    result = _extract_imaginary_mode_from_hessian(
         hess, mol_mode, atomic_masses, atomic_numbers
     )
+    if profiling:
+        result["profiling"] = profiling
+    return result
 
 
 def run_capability_check(

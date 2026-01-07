@@ -601,6 +601,7 @@ def _run_smoke_test_case(
         scan_grid=None,
         scan_mode=None,
         scan_result_csv=None,
+        profile=bool(getattr(args, "profile", False)),
         queue_runner=False,
     )
     if args.no_isolate:

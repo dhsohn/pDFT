@@ -1,4 +1,5 @@
 import logging
+import time
 
 from run_opt_engine import (
     _build_scf_retry_overrides,
@@ -16,6 +17,7 @@ from run_opt_engine import (
 )
 from run_opt_dispersion import load_d3_calculator, parse_dispersion_settings
 from run_opt_resources import ensure_parent_dir, resolve_run_path
+from run_opt_utils import extract_step_count
 
 
 def _build_atom_spec_from_ase(atoms):
@@ -47,6 +49,7 @@ def _build_pyscf_calculator(
     memory_mb,
     optimizer_config,
     optimization_mode,
+    profiling_enabled=False,
 ):
     import numpy as np
 
@@ -94,6 +97,34 @@ def _build_pyscf_calculator(
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self._disable_density_fit = False
+            self._profiling_enabled = profiling_enabled
+            self._profile = {
+                "scf_seconds": 0.0,
+                "scf_calls": 0,
+                "scf_cycles": 0,
+                "gradient_seconds": 0.0,
+                "gradient_calls": 0,
+            }
+
+        def _record_scf(self, mf, elapsed_seconds):
+            if not self._profiling_enabled:
+                return
+            self._profile["scf_seconds"] += elapsed_seconds
+            self._profile["scf_calls"] += 1
+            cycles = extract_step_count(mf)
+            if cycles is not None:
+                self._profile["scf_cycles"] += cycles
+
+        def _record_gradient(self, elapsed_seconds):
+            if not self._profiling_enabled:
+                return
+            self._profile["gradient_seconds"] += elapsed_seconds
+            self._profile["gradient_calls"] += 1
+
+        def get_profile(self):
+            if not self._profiling_enabled:
+                return None
+            return dict(self._profile)
 
         def _run_scf_and_grad(self, mol, *, allow_density_fit):
             base_config = scf_config or {}
@@ -123,10 +154,15 @@ def _build_pyscf_calculator(
                 return mf, density_fit_applied
 
             def _run_kernel(mf, scf_settings):
+                scf_start = time.perf_counter() if self._profiling_enabled else None
                 dm0, _ = apply_scf_checkpoint(mf, scf_settings, run_dir=run_dir)
                 if dm0 is not None:
-                    return mf.kernel(dm0=dm0)
-                return mf.kernel()
+                    energy_value = mf.kernel(dm0=dm0)
+                else:
+                    energy_value = mf.kernel()
+                if scf_start is not None:
+                    self._record_scf(mf, time.perf_counter() - scf_start)
+                return energy_value
 
             last_energy = None
             last_mf = None
@@ -145,7 +181,10 @@ def _build_pyscf_calculator(
                 if _is_scf_converged(mf):
                     if attempt_index > 0:
                         logging.info("SCF converged after retry %s.", attempt_index)
+                    grad_start = time.perf_counter() if self._profiling_enabled else None
                     grad = mf.nuc_grad_method().kernel()
+                    if grad_start is not None:
+                        self._record_gradient(time.perf_counter() - grad_start)
                     return energy_hartree, grad, density_fit_applied
 
             if retry_overrides:
@@ -153,7 +192,10 @@ def _build_pyscf_calculator(
                     "SCF did not converge after %s retries; proceeding with last result.",
                     len(retry_overrides),
                 )
+            grad_start = time.perf_counter() if self._profiling_enabled else None
             grad = last_mf.nuc_grad_method().kernel()
+            if grad_start is not None:
+                self._record_gradient(time.perf_counter() - grad_start)
             return last_energy, grad, last_density_fit
 
 
@@ -210,6 +252,15 @@ def _build_pyscf_calculator(
         def __init__(self, calculators, **kwargs):
             super().__init__(**kwargs)
             self.calculators = calculators
+            self._profile_source = calculators[0] if calculators else None
+
+        def get_profile(self):
+            if self._profile_source is None:
+                return None
+            getter = getattr(self._profile_source, "get_profile", None)
+            if getter is None:
+                return None
+            return getter()
 
         def calculate(self, atoms=None, properties=None, system_changes=all_changes):
             super().calculate(atoms, properties, system_changes)
@@ -383,6 +434,7 @@ def _run_ase_optimizer(
     optimizer_config,
     optimization_mode,
     constraints,
+    profiling_enabled=False,
     step_callback=None,
 ):
     try:
@@ -413,6 +465,7 @@ def _run_ase_optimizer(
         memory_mb=memory_mb,
         optimizer_config=optimizer_config,
         optimization_mode=optimization_mode,
+        profiling_enabled=profiling_enabled,
     )
     _apply_constraints(atoms, constraints)
 
@@ -485,7 +538,14 @@ def _run_ase_optimizer(
     optimizer.run(fmax=fmax, steps=steps)
 
     ase_write(output_xyz, atoms, format="xyz")
-    return getattr(optimizer, "nsteps", None)
+    profile = None
+    profile_getter = getattr(atoms.calc, "get_profile", None)
+    if profile_getter is not None:
+        profile = profile_getter()
+    return {
+        "n_steps": getattr(optimizer, "nsteps", None),
+        "profiling": profile,
+    }
 
 
 def _run_ase_irc(
@@ -510,6 +570,7 @@ def _run_ase_irc(
     steps,
     step_size,
     force_threshold,
+    profiling_enabled=False,
     output_prefix="irc",
 ):
     import numpy as np
@@ -542,6 +603,7 @@ def _run_ase_irc(
         memory_mb=memory_mb,
         optimizer_config=optimizer_config,
         optimization_mode=optimization_mode,
+        profiling_enabled=profiling_enabled,
     )
     _apply_constraints(atoms, constraints)
     positions = atoms.get_positions()
@@ -588,10 +650,15 @@ def _run_ase_irc(
             direction_unit = mass_weighted / mass_norm
             step_atoms.set_positions(step_atoms.get_positions() + step_size * direction_unit)
 
+    profiling = None
+    profile_getter = getattr(atoms.calc, "get_profile", None)
+    if profile_getter is not None:
+        profiling = profile_getter()
     return {
         "profile": profile,
         "forward_xyz": outputs.get("forward"),
         "reverse_xyz": outputs.get("reverse"),
+        "profiling": profiling,
     }
 
 
