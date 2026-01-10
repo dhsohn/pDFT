@@ -573,6 +573,9 @@ def _run_ase_irc(
     force_threshold,
     profiling_enabled=False,
     output_prefix="irc",
+    step_callback=None,
+    direction_callback=None,
+    resume_state=None,
 ):
     try:
         from ase import units
@@ -648,35 +651,72 @@ def _run_ase_irc(
         output_xyz = resolve_run_path(run_dir, f"{output_prefix}_{direction}.xyz")
         outputs[direction] = output_xyz
         ensure_parent_dir(output_xyz)
-        if os.path.exists(output_xyz):
+        direction_state = None
+        direction_completed = False
+        if resume_state:
+            direction_state = resume_state.get(direction)
+            direction_completed = bool(resume_state.get(f"{direction}_completed"))
+        if os.path.exists(output_xyz) and direction_state is None:
             os.remove(output_xyz)
         direction_profile = []
-        atoms.set_positions(ts_positions)
+        resume_offset = 0
+        steps_to_run = steps
+        if direction_completed:
+            if direction_callback is not None:
+                completed_step = None
+                if direction_state and direction_state.get("step") is not None:
+                    completed_step = direction_state.get("step")
+                direction_callback(direction, completed_step)
+            return direction_profile
+        if direction_state and direction_state.get("step") is not None:
+            resume_offset = int(direction_state.get("step")) + 1
+            steps_to_run = max(steps - resume_offset, 0)
+        if direction_state and direction_state.get("xyz"):
+            resume_atoms = ase_read(direction_state["xyz"])
+            if len(resume_atoms) != len(atoms):
+                raise ValueError(
+                    f"IRC resume geometry atom count mismatch for {direction}."
+                )
+            atoms.set_positions(resume_atoms.get_positions())
+        else:
+            atoms.set_positions(ts_positions)
+        if steps_to_run <= 0:
+            if direction_callback is not None:
+                last_step = resume_offset - 1 if resume_offset else None
+                direction_callback(direction, last_step)
+            return direction_profile
         irc = _build_irc()
         start_step = irc.nsteps
 
         def _record_step():
             if irc.nsteps == start_step:
                 return
-            step_index = irc.nsteps - start_step - 1
+            step_index = resume_offset + irc.nsteps - start_step - 1
             energy_ev = atoms.get_potential_energy()
+            energy_hartree = float(energy_ev / units.Hartree)
             direction_profile.append(
                 {
                     "direction": direction,
                     "step": step_index,
                     "energy_ev": float(energy_ev),
-                    "energy_hartree": float(energy_ev / units.Hartree),
+                    "energy_hartree": energy_hartree,
                 }
             )
+            if step_callback is not None:
+                step_callback(direction, step_index, atoms, energy_ev, energy_hartree)
             ase_write(output_xyz, atoms, format="xyz", append=True)
 
         irc.attach(_record_step, interval=1)
         irc.run(
             fmax=force_threshold,
             fmax_inner=force_threshold,
-            steps=steps,
+            steps=steps_to_run,
             direction=direction,
         )
+        if direction_callback is not None:
+            steps_run = max(irc.nsteps - start_step, 0)
+            last_step = resume_offset + steps_run - 1 if steps_run else None
+            direction_callback(direction, last_step)
         return direction_profile
 
     for direction in ("forward", "reverse"):

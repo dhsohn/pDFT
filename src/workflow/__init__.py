@@ -696,6 +696,7 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                     "event_log_path": event_log_path,
                     "run_id": run_id,
                     "run_dir": run_dir,
+                    "resume_dir": context["resume_dir"],
                     "checkpoint_path": context["checkpoint_path"],
                     "pyscf_chkfile": calc_scf_config.get("chkfile") if calc_scf_config else None,
                     "frequency_output_path": frequency_output_path,

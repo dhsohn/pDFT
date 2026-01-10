@@ -284,6 +284,51 @@ def write_optimized_xyz(output_path, mol):
         )
 
 
+def format_xyz_comment(charge=None, spin=None, multiplicity=None, extra=None):
+    parts = []
+    if charge is not None:
+        parts.append(f"charge={charge}")
+    if spin is not None:
+        parts.append(f"spin={spin}")
+    if multiplicity is not None:
+        parts.append(f"multiplicity={multiplicity}")
+    if extra:
+        parts.append(str(extra))
+    return " ".join(parts)
+
+
+def write_xyz_snapshot(
+    output_path,
+    atom_spec,
+    charge=None,
+    spin=None,
+    multiplicity=None,
+    comment=None,
+    append=False,
+):
+    if not atom_spec:
+        return
+    try:
+        lines = [line for line in str(atom_spec).splitlines() if line.strip()]
+        atom_count = len(lines)
+        comment_line = comment if comment is not None else format_xyz_comment(
+            charge=charge,
+            spin=spin,
+            multiplicity=multiplicity,
+        )
+        payload = [str(atom_count), comment_line or ""] + lines + [""]
+        ensure_parent_dir(output_path)
+        mode = "a" if append else "w"
+        with open(output_path, mode, encoding="utf-8") as handle:
+            handle.write("\n".join(payload))
+    except Exception as exc:
+        logging.getLogger().warning(
+            "Failed to write XYZ snapshot to %s: %s",
+            output_path,
+            exc,
+        )
+
+
 def get_package_version(package_name):
     try:
         return importlib_metadata.version(package_name)

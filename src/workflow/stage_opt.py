@@ -22,10 +22,12 @@ from run_opt_metadata import (
     collect_git_metadata,
     compute_file_hash,
     compute_text_hash,
+    format_xyz_comment,
     get_package_version,
     parse_single_point_cycle_count,
     write_checkpoint,
     write_optimized_xyz,
+    write_xyz_snapshot,
     write_run_metadata,
 )
 from run_opt_resources import collect_environment_snapshot, ensure_parent_dir, resolve_run_path
@@ -335,6 +337,49 @@ def run_optimization_stage(
         except (OSError, json.JSONDecodeError):
             checkpoint_base = {}
 
+    snapshot_dir = resolve_run_path(run_dir, "snapshots")
+    opt_steps_snapshot = resolve_run_path(run_dir, "snapshots/optimization_steps.xyz")
+    opt_last_snapshot = resolve_run_path(run_dir, "snapshots/optimization_last.xyz")
+    irc_forward_steps_snapshot = resolve_run_path(
+        run_dir, "snapshots/irc_forward_steps.xyz"
+    )
+    irc_reverse_steps_snapshot = resolve_run_path(
+        run_dir, "snapshots/irc_reverse_steps.xyz"
+    )
+    irc_forward_last_snapshot = resolve_run_path(run_dir, "snapshots/irc_forward_last.xyz")
+    irc_reverse_last_snapshot = resolve_run_path(run_dir, "snapshots/irc_reverse_last.xyz")
+    resume_xyz_path = None
+    if context.get("resume_dir") and checkpoint_base:
+        resume_candidate = checkpoint_base.get("optimization_last_xyz")
+        if resume_candidate:
+            resume_candidate = resolve_run_path(run_dir, resume_candidate)
+            if os.path.exists(resume_candidate):
+                resume_xyz_path = resume_candidate
+        if resume_xyz_path is None:
+            resume_candidate = checkpoint_base.get("last_geometry_xyz")
+            if resume_candidate and checkpoint_base.get("last_stage") == "optimization":
+                resume_candidate = resolve_run_path(run_dir, resume_candidate)
+                if os.path.exists(resume_candidate):
+                    resume_xyz_path = resume_candidate
+        if resume_xyz_path is None and checkpoint_base.get("last_geometry"):
+            if checkpoint_base.get("last_stage") == "optimization":
+                resume_xyz_path = resolve_run_path(
+                    run_dir, "resume_last_geometry.xyz"
+                )
+                comment = format_xyz_comment(
+                    charge=charge,
+                    spin=spin,
+                    multiplicity=multiplicity,
+                    extra="resume=checkpoint",
+                )
+                write_xyz_snapshot(
+                    resume_xyz_path,
+                    checkpoint_base.get("last_geometry"),
+                    comment=comment,
+                )
+    if resume_xyz_path:
+        logging.info("Resuming optimization from snapshot: %s", resume_xyz_path)
+
     optimizer_name = (optimizer_ase_dict.get("optimizer") or "").lower()
     if not optimizer_name:
         optimizer_name = "sella" if optimizer_mode == "transition_state" else "bfgs"
@@ -345,6 +390,7 @@ def run_optimization_stage(
     input_xyz_path = (
         resolve_run_path(run_dir, input_xyz_name) if input_xyz_name else None
     )
+    optimizer_input_xyz = resume_xyz_path or input_xyz_path
     output_xyz_setting = (
         optimizer_config.output_xyz if optimizer_config else None
     ) or "ase_optimized.xyz"
@@ -380,8 +426,14 @@ def run_optimization_stage(
                 "input_xyz": input_xyz_path,
                 "output_xyz": output_xyz_path,
                 "pyscf_chkfile": pyscf_chkfile,
+                "snapshot_dir": snapshot_dir,
+                "optimization_steps_xyz": opt_steps_snapshot,
             }
         )
+        if atoms is not None or atom_spec is not None:
+            checkpoint_payload["last_stage"] = "optimization"
+            checkpoint_payload["last_geometry_xyz"] = opt_last_snapshot
+            checkpoint_payload["optimization_last_xyz"] = opt_last_snapshot
         if scf_energy is not None:
             checkpoint_payload["last_scf_energy"] = scf_energy
         if scf_converged is not None:
@@ -390,7 +442,30 @@ def run_optimization_stage(
             checkpoint_payload["status"] = status
         if error_message is not None:
             checkpoint_payload["error"] = error_message
+        if step is not None:
+            checkpoint_payload["last_step"] = step
+            checkpoint_payload["optimization_last_step"] = step
         write_checkpoint(checkpoint_path, checkpoint_payload)
+
+    def _write_opt_snapshot(atoms, step_value):
+        atom_spec = _atoms_to_atom_spec(atoms)
+        comment = format_xyz_comment(
+            charge=charge,
+            spin=spin,
+            multiplicity=multiplicity,
+            extra=f"step={step_value}",
+        )
+        write_xyz_snapshot(
+            opt_steps_snapshot,
+            atom_spec,
+            comment=comment,
+            append=True,
+        )
+        write_xyz_snapshot(
+            opt_last_snapshot,
+            atom_spec,
+            comment=comment,
+        )
 
     def _step_callback(*_args, **_kwargs):
         n_steps["value"] += 1
@@ -405,15 +480,17 @@ def run_optimization_stage(
             should_write = (
                 now - last_metadata_write["time"] >= io_write_interval_seconds
             )
+        optimizer = _args[0] if _args else None
+        atoms = getattr(optimizer, "atoms", None) if optimizer is not None else None
+        if atoms is not None:
+            _write_opt_snapshot(atoms, step_value)
+            _write_checkpoint(atoms=atoms, step=step_value, status="running")
         if should_write:
-            optimizer = _args[0] if _args else None
-            atoms = getattr(optimizer, "atoms", None) if optimizer is not None else None
             optimization_metadata["n_steps"] = step_value
             optimization_metadata["n_steps_source"] = "ase"
             optimization_metadata["status"] = "running"
             optimization_metadata["run_updated_at"] = datetime.now().isoformat()
             write_run_metadata(run_metadata_path, optimization_metadata)
-            _write_checkpoint(atoms=atoms, step=step_value, status="running")
             last_metadata_write["time"] = now
             last_metadata_write["step"] = step_value
 
@@ -423,7 +500,7 @@ def run_optimization_stage(
                 shutil.copy2(args.xyz_file, input_xyz_path)
         ensure_parent_dir(output_xyz_path)
         opt_result = _run_ase_optimizer(
-            input_xyz_path,
+            optimizer_input_xyz,
             output_xyz_path,
             run_dir,
             charge,
@@ -873,6 +950,107 @@ def run_optimization_stage(
                         mode_result.get("eigenvalue", 0.0),
                     )
                 mode_profiling = mode_result.get("profiling") if profiling_enabled else None
+                irc_profile_cache = []
+                irc_profile_keys = set()
+                if context.get("resume_dir") and checkpoint_base.get("irc_profile"):
+                    irc_profile_cache = list(checkpoint_base.get("irc_profile", []))
+                    for entry in irc_profile_cache:
+                        irc_profile_keys.add(
+                            (entry.get("direction"), entry.get("step"))
+                        )
+                irc_resume_state = None
+                if context.get("resume_dir") and checkpoint_base:
+                    irc_resume_state = {
+                        "forward_completed": bool(
+                            checkpoint_base.get("irc_forward_completed")
+                        ),
+                        "reverse_completed": bool(
+                            checkpoint_base.get("irc_reverse_completed")
+                        ),
+                    }
+                    for direction in ("forward", "reverse"):
+                        step_key = f"irc_{direction}_step"
+                        xyz_key = f"irc_{direction}_last_xyz"
+                        step_value = checkpoint_base.get(step_key)
+                        xyz_value = checkpoint_base.get(xyz_key)
+                        if xyz_value:
+                            resolved = resolve_run_path(run_dir, xyz_value)
+                            if os.path.exists(resolved):
+                                irc_resume_state[direction] = {
+                                    "step": step_value,
+                                    "xyz": resolved,
+                                }
+
+                def _persist_checkpoint():
+                    if not checkpoint_path:
+                        return
+                    write_checkpoint(checkpoint_path, checkpoint_base)
+
+                def _record_irc_step(
+                    direction,
+                    step_index,
+                    atoms,
+                    energy_ev,
+                    energy_hartree,
+                ):
+                    atom_spec = _atoms_to_atom_spec(atoms)
+                    comment = format_xyz_comment(
+                        charge=charge,
+                        spin=spin,
+                        multiplicity=multiplicity,
+                        extra=f"step={step_index} direction={direction}",
+                    )
+                    steps_path = (
+                        irc_forward_steps_snapshot
+                        if direction == "forward"
+                        else irc_reverse_steps_snapshot
+                    )
+                    last_path = (
+                        irc_forward_last_snapshot
+                        if direction == "forward"
+                        else irc_reverse_last_snapshot
+                    )
+                    write_xyz_snapshot(
+                        steps_path,
+                        atom_spec,
+                        comment=comment,
+                        append=True,
+                    )
+                    write_xyz_snapshot(last_path, atom_spec, comment=comment)
+                    checkpoint_base.update(
+                        {
+                            "last_stage": "irc",
+                            "last_step": step_index,
+                            "last_geometry": atom_spec,
+                            "last_geometry_xyz": last_path,
+                            "snapshot_dir": snapshot_dir,
+                            "irc_forward_steps_xyz": irc_forward_steps_snapshot,
+                            "irc_reverse_steps_xyz": irc_reverse_steps_snapshot,
+                            "irc_direction": direction,
+                            f"irc_{direction}_step": step_index,
+                            f"irc_{direction}_last_xyz": last_path,
+                        }
+                    )
+                    entry_key = (direction, step_index)
+                    if entry_key not in irc_profile_keys:
+                        irc_profile_keys.add(entry_key)
+                        irc_profile_cache.append(
+                            {
+                                "direction": direction,
+                                "step": step_index,
+                                "energy_ev": float(energy_ev),
+                                "energy_hartree": float(energy_hartree),
+                            }
+                        )
+                    checkpoint_base["irc_profile"] = irc_profile_cache
+                    _persist_checkpoint()
+
+                def _mark_direction_complete(direction, last_step):
+                    checkpoint_base[f"irc_{direction}_completed"] = True
+                    if last_step is not None:
+                        checkpoint_base[f"irc_{direction}_step"] = last_step
+                    _persist_checkpoint()
+
                 irc_result = _run_ase_irc(
                     output_xyz_path,
                     run_dir,
@@ -896,7 +1074,11 @@ def run_optimization_stage(
                     irc_step_size,
                     irc_force_threshold,
                     profiling_enabled=profiling_enabled,
+                    step_callback=_record_irc_step,
+                    direction_callback=_mark_direction_complete,
+                    resume_state=irc_resume_state,
                 )
+                profile = irc_profile_cache or irc_result.get("profile", [])
                 irc_payload = {
                     "status": "completed",
                     "output_file": irc_output_path,
@@ -906,7 +1088,7 @@ def run_optimization_stage(
                     "step_size": irc_step_size,
                     "force_threshold": irc_force_threshold,
                     "mode_eigenvalue": mode_result.get("eigenvalue"),
-                    "profile": irc_result.get("profile", []),
+                    "profile": profile,
                     "profiling": {
                         "mode": mode_profiling,
                         "irc": irc_result.get("profiling"),

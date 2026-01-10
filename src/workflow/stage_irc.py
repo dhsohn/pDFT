@@ -1,11 +1,14 @@
 import csv
 import json
 import logging
+import os
 import time
 
 from ase_backend import _run_ase_irc
+from run_opt_metadata import format_xyz_comment, write_checkpoint, write_xyz_snapshot
+from run_opt_resources import resolve_run_path
 from .events import finalize_metadata
-from .utils import _evaluate_irc_profile
+from .utils import _atoms_to_atom_spec, _evaluate_irc_profile
 
 
 def run_irc_stage(stage_context, queue_update_fn):
@@ -14,6 +17,113 @@ def run_irc_stage(stage_context, queue_update_fn):
     calculation_metadata = stage_context["metadata"]
     profiling_enabled = bool(stage_context.get("profiling_enabled"))
     mode_profiling = stage_context.get("mode_profiling")
+    run_dir = stage_context["run_dir"]
+    checkpoint_path = stage_context.get("checkpoint_path")
+    resume_dir = stage_context.get("resume_dir")
+    charge = stage_context.get("charge")
+    spin = stage_context.get("spin")
+    multiplicity = stage_context.get("multiplicity")
+
+    snapshot_dir = resolve_run_path(run_dir, "snapshots")
+    forward_steps_snapshot = resolve_run_path(
+        run_dir, "snapshots/irc_forward_steps.xyz"
+    )
+    reverse_steps_snapshot = resolve_run_path(
+        run_dir, "snapshots/irc_reverse_steps.xyz"
+    )
+    forward_last_snapshot = resolve_run_path(run_dir, "snapshots/irc_forward_last.xyz")
+    reverse_last_snapshot = resolve_run_path(run_dir, "snapshots/irc_reverse_last.xyz")
+
+    checkpoint_base = {}
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        try:
+            with open(checkpoint_path, "r", encoding="utf-8") as checkpoint_file:
+                checkpoint_base = json.load(checkpoint_file)
+        except (OSError, json.JSONDecodeError):
+            checkpoint_base = {}
+
+    profile_cache = []
+    profile_keys = set()
+    if resume_dir and checkpoint_base.get("irc_profile"):
+        profile_cache = list(checkpoint_base.get("irc_profile", []))
+        for entry in profile_cache:
+            key = (entry.get("direction"), entry.get("step"))
+            profile_keys.add(key)
+
+    resume_state = None
+    if resume_dir and checkpoint_base:
+        resume_state = {
+            "forward_completed": bool(checkpoint_base.get("irc_forward_completed")),
+            "reverse_completed": bool(checkpoint_base.get("irc_reverse_completed")),
+        }
+        for direction in ("forward", "reverse"):
+            step_key = f"irc_{direction}_step"
+            xyz_key = f"irc_{direction}_last_xyz"
+            step_value = checkpoint_base.get(step_key)
+            xyz_value = checkpoint_base.get(xyz_key)
+            if xyz_value:
+                resolved = resolve_run_path(run_dir, xyz_value)
+                if os.path.exists(resolved):
+                    resume_state[direction] = {
+                        "step": step_value,
+                        "xyz": resolved,
+                    }
+
+    def _persist_checkpoint():
+        if not checkpoint_path:
+            return
+        write_checkpoint(checkpoint_path, checkpoint_base)
+
+    def _record_irc_step(direction, step_index, atoms, energy_ev, energy_hartree):
+        atom_spec = _atoms_to_atom_spec(atoms)
+        comment = format_xyz_comment(
+            charge=charge,
+            spin=spin,
+            multiplicity=multiplicity,
+            extra=f"step={step_index} direction={direction}",
+        )
+        steps_path = (
+            forward_steps_snapshot if direction == "forward" else reverse_steps_snapshot
+        )
+        last_path = (
+            forward_last_snapshot if direction == "forward" else reverse_last_snapshot
+        )
+        write_xyz_snapshot(steps_path, atom_spec, comment=comment, append=True)
+        write_xyz_snapshot(last_path, atom_spec, comment=comment)
+        checkpoint_base.update(
+            {
+                "last_stage": "irc",
+                "last_step": step_index,
+                "last_geometry": atom_spec,
+                "last_geometry_xyz": last_path,
+                "snapshot_dir": snapshot_dir,
+                "irc_forward_steps_xyz": forward_steps_snapshot,
+                "irc_reverse_steps_xyz": reverse_steps_snapshot,
+                "irc_direction": direction,
+                f"irc_{direction}_step": step_index,
+                f"irc_{direction}_last_xyz": last_path,
+            }
+        )
+        entry_key = (direction, step_index)
+        if entry_key not in profile_keys:
+            profile_keys.add(entry_key)
+            profile_cache.append(
+                {
+                    "direction": direction,
+                    "step": step_index,
+                    "energy_ev": float(energy_ev),
+                    "energy_hartree": float(energy_hartree),
+                }
+            )
+        checkpoint_base["irc_profile"] = profile_cache
+        _persist_checkpoint()
+
+    def _mark_direction_complete(direction, last_step):
+        checkpoint_base[f"irc_{direction}_completed"] = True
+        if last_step is not None:
+            checkpoint_base[f"irc_{direction}_step"] = last_step
+        _persist_checkpoint()
+
     try:
         irc_result = _run_ase_irc(
             stage_context["input_xyz"],
@@ -38,7 +148,11 @@ def run_irc_stage(stage_context, queue_update_fn):
             stage_context["irc_step_size"],
             stage_context["irc_force_threshold"],
             profiling_enabled=profiling_enabled,
+            step_callback=_record_irc_step,
+            direction_callback=_mark_direction_complete,
+            resume_state=resume_state,
         )
+        profile = profile_cache or irc_result.get("profile", [])
         irc_payload = {
             "status": "completed",
             "output_file": stage_context["irc_output_path"],
@@ -48,7 +162,7 @@ def run_irc_stage(stage_context, queue_update_fn):
             "step_size": stage_context["irc_step_size"],
             "force_threshold": stage_context["irc_force_threshold"],
             "mode_eigenvalue": stage_context.get("mode_eigenvalue"),
-            "profile": irc_result.get("profile", []),
+            "profile": profile,
             "profile_csv_file": stage_context["irc_profile_csv_path"],
             "profiling": {
                 "mode": mode_profiling,
