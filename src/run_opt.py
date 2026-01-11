@@ -32,7 +32,7 @@ from run_opt_config import (
 )
 from run_opt_paths import get_runs_base_dir, get_smoke_runs_base_dir
 from run_opt_resources import create_run_directory, maybe_auto_archive_runs
-from run_opt_metadata import write_run_metadata
+from run_opt_metadata import compute_text_hash, write_run_metadata
 
 TERMINAL_RESUME_STATUSES = {"completed", "failed", "timeout", "canceled"}
 
@@ -858,6 +858,59 @@ def _load_resume_checkpoint(resume_dir):
     }
 
 
+def _read_text_file(path):
+    if not path:
+        return None
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _check_resume_config_mismatch(resume_state, policy):
+    if policy == "ignore":
+        return
+    resume_raw = resume_state.get("config_raw")
+    resume_hash = compute_text_hash(resume_raw)
+    if resume_hash is None:
+        return
+    mismatches = []
+    checkpoint_raw = None
+    checkpoint_path = resume_state.get("checkpoint_path")
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        try:
+            checkpoint_payload = json.loads(
+                Path(checkpoint_path).read_text(encoding="utf-8")
+            )
+            checkpoint_raw = checkpoint_payload.get("config_raw")
+        except (OSError, json.JSONDecodeError):
+            checkpoint_raw = None
+    if checkpoint_raw:
+        checkpoint_hash = compute_text_hash(checkpoint_raw)
+        if checkpoint_hash and checkpoint_hash != resume_hash:
+            mismatches.append(
+                "config_used.json differs from checkpoint.json "
+                f"(resume={resume_hash[:8]}, checkpoint={checkpoint_hash[:8]})"
+            )
+    config_source_path = resume_state.get("config_source_path")
+    if config_source_path:
+        config_source_raw = _read_text_file(config_source_path)
+        if config_source_raw:
+            config_source_hash = compute_text_hash(config_source_raw)
+            if config_source_hash and config_source_hash != resume_hash:
+                mismatches.append(
+                    "config source differs from resume config "
+                    f"({config_source_path}, resume={resume_hash[:8]}, "
+                    f"source={config_source_hash[:8]})"
+                )
+    if not mismatches:
+        return
+    message = "Resume config mismatch detected: " + "; ".join(mismatches)
+    if policy == "error":
+        raise ValueError(message)
+    logging.warning(message)
+
+
 def _load_resume_status(run_metadata_path):
     if not run_metadata_path:
         return None
@@ -1233,6 +1286,10 @@ def main():
             args.run_dir = str(resume_state["resume_dir"])
             config_raw = resume_state["config_raw"]
             config_source_path = resume_state["config_source_path"]
+            _check_resume_config_mismatch(
+                resume_state,
+                getattr(args, "resume_config_mismatch", "warn"),
+            )
             if config_source_path is not None:
                 args.config = str(config_source_path)
             else:

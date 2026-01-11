@@ -709,6 +709,8 @@ def run(args, config: RunConfig, config_raw, config_source_path, run_in_backgrou
                     "optimizer_ase_config": context["optimizer_ase_dict"],
                     "constraints": context["constraints"],
                     "profiling_enabled": profiling_enabled,
+                    "snapshot_interval_steps": context.get("snapshot_interval_steps"),
+                    "snapshot_mode": context.get("snapshot_mode"),
                 }
                 if calculation_mode == "single_point":
                     run_single_point_stage(stage_context, _update_foreground_queue)

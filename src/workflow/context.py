@@ -124,6 +124,17 @@ def prepare_run_context(args, config: RunConfig, config_raw) -> RunContext:
         if io_config and io_config.scan_write_interval_points is not None
         else 1
     )
+    snapshot_interval_steps = (
+        io_config.snapshot_interval_steps
+        if io_config and io_config.snapshot_interval_steps is not None
+        else 1
+    )
+    snapshot_mode = (
+        io_config.snapshot_mode
+        if io_config and io_config.snapshot_mode is not None
+        else "all"
+    )
+    snapshot_mode = str(snapshot_mode).lower()
     profiling_enabled = bool(getattr(args, "profile", False)) or _env_truthy(
         "DFTFLOW_PROFILE"
     )
@@ -241,6 +252,8 @@ def prepare_run_context(args, config: RunConfig, config_raw) -> RunContext:
         "io_write_interval_steps": io_write_interval_steps,
         "io_write_interval_seconds": io_write_interval_seconds,
         "scan_write_interval_points": scan_write_interval_points,
+        "snapshot_interval_steps": snapshot_interval_steps,
+        "snapshot_mode": snapshot_mode,
         "run_dir": run_dir,
         "log_path": log_path,
         "scf_config": scf_config,

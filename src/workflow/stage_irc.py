@@ -23,6 +23,16 @@ def run_irc_stage(stage_context, queue_update_fn):
     charge = stage_context.get("charge")
     spin = stage_context.get("spin")
     multiplicity = stage_context.get("multiplicity")
+    snapshot_interval_steps = stage_context.get("snapshot_interval_steps", 1)
+    snapshot_mode = stage_context.get("snapshot_mode", "all")
+    snapshot_mode = (snapshot_mode or "all").lower()
+    if snapshot_interval_steps is None or snapshot_interval_steps <= 0:
+        snapshot_interval_steps = 1
+    if snapshot_mode not in ("none", "last", "all"):
+        logging.warning("Unknown snapshot_mode '%s'; defaulting to 'all'.", snapshot_mode)
+        snapshot_mode = "all"
+    snapshot_write_steps = snapshot_mode == "all"
+    snapshot_write_last = snapshot_mode in ("all", "last")
 
     snapshot_dir = resolve_run_path(run_dir, "snapshots")
     forward_steps_snapshot = resolve_run_path(
@@ -49,6 +59,17 @@ def run_irc_stage(stage_context, queue_update_fn):
         for entry in profile_cache:
             key = (entry.get("direction"), entry.get("step"))
             profile_keys.add(key)
+    irc_last_snapshot_step = {"forward": -1, "reverse": -1}
+    irc_last_checkpoint_step = {"forward": -1, "reverse": -1}
+    irc_last_geometry_cache = {"forward": None, "reverse": None}
+    irc_last_step_cache = {"forward": None, "reverse": None}
+
+    def _parse_step(value):
+        try:
+            step_value = int(value)
+        except (TypeError, ValueError):
+            return None
+        return step_value if step_value >= 0 else None
 
     resume_state = None
     if resume_dir and checkpoint_base:
@@ -59,15 +80,41 @@ def run_irc_stage(stage_context, queue_update_fn):
         for direction in ("forward", "reverse"):
             step_key = f"irc_{direction}_step"
             xyz_key = f"irc_{direction}_last_xyz"
-            step_value = checkpoint_base.get(step_key)
+            geom_key = f"irc_{direction}_last_geometry"
+            step_value_raw = checkpoint_base.get(step_key)
+            step_value = _parse_step(step_value_raw)
+            if step_value is not None:
+                irc_last_snapshot_step[direction] = step_value
+                irc_last_checkpoint_step[direction] = step_value
             xyz_value = checkpoint_base.get(xyz_key)
             if xyz_value:
                 resolved = resolve_run_path(run_dir, xyz_value)
                 if os.path.exists(resolved):
                     resume_state[direction] = {
-                        "step": step_value,
+                        "step": step_value if step_value is not None else step_value_raw,
                         "xyz": resolved,
                     }
+                    continue
+            atom_spec = checkpoint_base.get(geom_key)
+            if atom_spec and step_value is not None:
+                resume_xyz = resolve_run_path(
+                    run_dir, f"resume_irc_{direction}_last_geometry.xyz"
+                )
+                comment = format_xyz_comment(
+                    charge=charge,
+                    spin=spin,
+                    multiplicity=multiplicity,
+                    extra=f"resume=checkpoint direction={direction}",
+                )
+                write_xyz_snapshot(
+                    resume_xyz,
+                    atom_spec,
+                    comment=comment,
+                )
+                resume_state[direction] = {
+                    "step": step_value,
+                    "xyz": resume_xyz,
+                }
 
     def _persist_checkpoint():
         if not checkpoint_path:
@@ -76,33 +123,13 @@ def run_irc_stage(stage_context, queue_update_fn):
 
     def _record_irc_step(direction, step_index, atoms, energy_ev, energy_hartree):
         atom_spec = _atoms_to_atom_spec(atoms)
-        comment = format_xyz_comment(
-            charge=charge,
-            spin=spin,
-            multiplicity=multiplicity,
-            extra=f"step={step_index} direction={direction}",
-        )
+        irc_last_geometry_cache[direction] = atom_spec
+        irc_last_step_cache[direction] = step_index
         steps_path = (
             forward_steps_snapshot if direction == "forward" else reverse_steps_snapshot
         )
         last_path = (
             forward_last_snapshot if direction == "forward" else reverse_last_snapshot
-        )
-        write_xyz_snapshot(steps_path, atom_spec, comment=comment, append=True)
-        write_xyz_snapshot(last_path, atom_spec, comment=comment)
-        checkpoint_base.update(
-            {
-                "last_stage": "irc",
-                "last_step": step_index,
-                "last_geometry": atom_spec,
-                "last_geometry_xyz": last_path,
-                "snapshot_dir": snapshot_dir,
-                "irc_forward_steps_xyz": forward_steps_snapshot,
-                "irc_reverse_steps_xyz": reverse_steps_snapshot,
-                "irc_direction": direction,
-                f"irc_{direction}_step": step_index,
-                f"irc_{direction}_last_xyz": last_path,
-            }
         )
         entry_key = (direction, step_index)
         if entry_key not in profile_keys:
@@ -115,10 +142,98 @@ def run_irc_stage(stage_context, queue_update_fn):
                     "energy_hartree": float(energy_hartree),
                 }
             )
-        checkpoint_base["irc_profile"] = profile_cache
-        _persist_checkpoint()
+        should_snapshot = (
+            step_index - irc_last_snapshot_step[direction] >= snapshot_interval_steps
+        )
+        should_checkpoint = (
+            step_index - irc_last_checkpoint_step[direction] >= snapshot_interval_steps
+        )
+        if should_snapshot and snapshot_mode != "none":
+            comment = format_xyz_comment(
+                charge=charge,
+                spin=spin,
+                multiplicity=multiplicity,
+                extra=f"step={step_index} direction={direction}",
+            )
+            if snapshot_write_steps:
+                write_xyz_snapshot(steps_path, atom_spec, comment=comment, append=True)
+            if snapshot_write_last:
+                write_xyz_snapshot(last_path, atom_spec, comment=comment)
+            irc_last_snapshot_step[direction] = step_index
+        if should_checkpoint:
+            checkpoint_base.update(
+                {
+                    "last_stage": "irc",
+                    "last_step": step_index,
+                    "last_step_stage": "irc",
+                    "last_step_direction": direction,
+                    "last_geometry": atom_spec,
+                    "snapshot_dir": snapshot_dir,
+                    "irc_direction": direction,
+                    f"irc_{direction}_step": step_index,
+                    f"irc_{direction}_last_geometry": atom_spec,
+                }
+            )
+            if snapshot_write_steps:
+                checkpoint_base["irc_forward_steps_xyz"] = forward_steps_snapshot
+                checkpoint_base["irc_reverse_steps_xyz"] = reverse_steps_snapshot
+            else:
+                checkpoint_base.pop("irc_forward_steps_xyz", None)
+                checkpoint_base.pop("irc_reverse_steps_xyz", None)
+            if snapshot_write_last:
+                checkpoint_base["last_geometry_xyz"] = last_path
+                checkpoint_base[f"irc_{direction}_last_xyz"] = last_path
+            else:
+                checkpoint_base.pop("last_geometry_xyz", None)
+                checkpoint_base.pop(f"irc_{direction}_last_xyz", None)
+            checkpoint_base["irc_profile"] = profile_cache
+            _persist_checkpoint()
+            irc_last_checkpoint_step[direction] = step_index
 
     def _mark_direction_complete(direction, last_step):
+        cached_step = irc_last_step_cache.get(direction)
+        if cached_step is not None:
+            last_step = cached_step
+        atom_spec = irc_last_geometry_cache.get(direction)
+        if atom_spec:
+            comment = format_xyz_comment(
+                charge=charge,
+                spin=spin,
+                multiplicity=multiplicity,
+                extra=f"step={last_step} direction={direction}",
+            )
+            last_path = (
+                forward_last_snapshot
+                if direction == "forward"
+                else reverse_last_snapshot
+            )
+            if snapshot_write_last:
+                write_xyz_snapshot(last_path, atom_spec, comment=comment)
+            checkpoint_base.update(
+                {
+                    "last_stage": "irc",
+                    "last_step": last_step,
+                    "last_step_stage": "irc",
+                    "last_step_direction": direction,
+                    "last_geometry": atom_spec,
+                    "snapshot_dir": snapshot_dir,
+                    "irc_direction": direction,
+                    f"irc_{direction}_last_geometry": atom_spec,
+                }
+            )
+            if snapshot_write_steps:
+                checkpoint_base["irc_forward_steps_xyz"] = forward_steps_snapshot
+                checkpoint_base["irc_reverse_steps_xyz"] = reverse_steps_snapshot
+            else:
+                checkpoint_base.pop("irc_forward_steps_xyz", None)
+                checkpoint_base.pop("irc_reverse_steps_xyz", None)
+            if snapshot_write_last:
+                checkpoint_base["last_geometry_xyz"] = last_path
+                checkpoint_base[f"irc_{direction}_last_xyz"] = last_path
+            else:
+                checkpoint_base.pop("last_geometry_xyz", None)
+                checkpoint_base.pop(f"irc_{direction}_last_xyz", None)
+        checkpoint_base["irc_profile"] = profile_cache
         checkpoint_base[f"irc_{direction}_completed"] = True
         if last_step is not None:
             checkpoint_base[f"irc_{direction}_step"] = last_step

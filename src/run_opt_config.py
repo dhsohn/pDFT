@@ -270,6 +270,8 @@ class IOConfig(ConfigModel):
     write_interval_steps: int | None = None
     write_interval_seconds: float | None = None
     scan_write_interval_points: int | None = None
+    snapshot_interval_steps: int | None = None
+    snapshot_mode: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "IOConfig | None":
@@ -537,6 +539,9 @@ def validate_run_config(config):
 
     def is_positive_number(value):
         return is_number(value) and value > 0
+
+    def is_snapshot_mode(value):
+        return is_str(value) and value.lower() in ("none", "last", "all")
 
     def normalize_calc_mode(value):
         if not value:
@@ -1190,6 +1195,14 @@ def validate_run_config(config):
             "scan_write_interval_points": (
                 is_positive_int,
                 "Config '{name}' must be a positive integer.",
+            ),
+            "snapshot_interval_steps": (
+                is_positive_int,
+                "Config '{name}' must be a positive integer.",
+            ),
+            "snapshot_mode": (
+                is_snapshot_mode,
+                "Config '{name}' must be one of: none, last, all.",
             ),
         }
         _validate_fields(config["io"], io_rules, prefix="io.")

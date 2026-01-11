@@ -360,7 +360,11 @@ dftflow queue prune --keep-days 30
 - `scan.batch_size` groups points per worker in local scans to reduce process overhead.
 - `scan_result_csv_file` sets the scan CSV output path (default: `scan_result.csv`).
 - `io.write_interval_steps` / `io.write_interval_seconds` control how often optimization
-  metadata/checkpoints are written (defaults: 5 steps or 5 seconds).
+  run metadata are written (defaults: 5 steps or 5 seconds).
+- `io.snapshot_interval_steps` controls how often geometry snapshots/checkpoints are
+  written during optimization/IRC (default: every step).
+- `io.snapshot_mode` chooses snapshot outputs: `none` (no snapshots), `last` (only the
+  latest snapshot per stage), or `all` (steps + last; default).
 - `io.scan_write_interval_points` controls how often scan results/metadata are written
   (default: every point).
 - `irc_profile_csv_file` sets the IRC profile CSV output path (default: `irc_profile.csv`).

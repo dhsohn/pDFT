@@ -30,6 +30,8 @@ class RunContext(TypedDict):
     io_write_interval_steps: NotRequired[int]
     io_write_interval_seconds: NotRequired[float | None]
     scan_write_interval_points: NotRequired[int]
+    snapshot_interval_steps: NotRequired[int]
+    snapshot_mode: NotRequired[str]
     run_dir: str
     log_path: str
     scf_config: dict[str, Any]

@@ -83,6 +83,15 @@ def build_parser():
         ),
     )
     run_parser.add_argument(
+        "--resume-config-mismatch",
+        choices=("warn", "error", "ignore"),
+        default="warn",
+        help=(
+            "How to handle resume config mismatches between checkpoint/config_used "
+            "and the current config (default: warn)."
+        ),
+    )
+    run_parser.add_argument(
         "--run-id",
         help="Optional run ID to use (useful for background launches).",
     )
