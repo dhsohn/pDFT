@@ -146,7 +146,9 @@ def run_irc_stage(stage_context, queue_update_fn):
             step_index - irc_last_snapshot_step[direction] >= snapshot_interval_steps
         )
         should_checkpoint = (
-            step_index - irc_last_checkpoint_step[direction] >= snapshot_interval_steps
+            irc_last_checkpoint_step[direction] < 0
+            or step_index - irc_last_checkpoint_step[direction]
+            >= snapshot_interval_steps
         )
         if should_snapshot and snapshot_mode != "none":
             comment = format_xyz_comment(

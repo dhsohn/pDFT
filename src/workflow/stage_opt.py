@@ -360,6 +360,7 @@ def run_optimization_stage(
 
     last_snapshot_write = {"step": n_steps["value"]}
     last_checkpoint_write = {"step": n_steps["value"]}
+    first_checkpoint_step = n_steps["value"] + 1
 
     snapshot_dir = resolve_run_path(run_dir, "snapshots")
     opt_steps_snapshot = resolve_run_path(run_dir, "snapshots/optimization_steps.xyz")
@@ -479,7 +480,9 @@ def run_optimization_stage(
             checkpoint_payload["last_step"] = step
             checkpoint_payload["last_step_stage"] = "optimization"
             checkpoint_payload["optimization_last_step"] = step
-        write_checkpoint(checkpoint_path, checkpoint_payload)
+        checkpoint_base.clear()
+        checkpoint_base.update(checkpoint_payload)
+        write_checkpoint(checkpoint_path, checkpoint_base)
 
     def _write_opt_snapshot(atom_spec, step_value, force_last_only=False):
         if snapshot_mode == "none" or not atom_spec:
@@ -526,6 +529,8 @@ def run_optimization_stage(
             should_checkpoint = (
                 step_value - last_checkpoint_write["step"] >= snapshot_interval_steps
             )
+            if step_value == first_checkpoint_step:
+                should_checkpoint = True
             if should_snapshot or should_checkpoint:
                 atom_spec = _atoms_to_atom_spec(atoms)
                 if should_snapshot:
@@ -1113,7 +1118,8 @@ def run_optimization_stage(
                         >= snapshot_interval_steps
                     )
                     should_checkpoint = (
-                        step_index - irc_last_checkpoint_step[direction]
+                        irc_last_checkpoint_step[direction] < 0
+                        or step_index - irc_last_checkpoint_step[direction]
                         >= snapshot_interval_steps
                     )
                     if should_snapshot and snapshot_mode != "none":
