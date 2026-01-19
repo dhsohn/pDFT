@@ -1,0 +1,38 @@
+site_name: DFTFlow User Manual
+site_description: DFTFlow CLI user manual (Korean and English)
+
+theme:
+  name: mkdocs
+
+nav:
+  - Home: index.md
+  - 한국어:
+      - 개요: ko/index.md
+      - 설치 및 시작: ko/getting-started.md
+      - 워크플로우: ko/workflows.md
+      - 큐와 백그라운드 실행: ko/queue.md
+      - 스캔: ko/scan.md
+      - 설정 파일: ko/config.md
+      - 출력물: ko/outputs.md
+      - 문제 해결: ko/troubleshooting.md
+      - CLI 레퍼런스: ko/cli.md
+  - English:
+      - Overview: en/index.md
+      - Install & Quickstart: en/getting-started.md
+      - Workflows: en/workflows.md
+      - Queue & Background: en/queue.md
+      - Scan: en/scan.md
+      - Configuration: en/config.md
+      - Outputs: en/outputs.md
+      - Troubleshooting: en/troubleshooting.md
+      - CLI Reference: en/cli.md
+
+markdown_extensions:
+  - fenced_code
+  - tables
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js
+  - assets/mermaid-init.js
