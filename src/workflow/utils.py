@@ -638,7 +638,7 @@ def _normalize_stage_flags(config, calculation_mode):
             single_point_enabled = True
     else:
         frequency_enabled = False
-        if calculation_mode == "frequency":
+        if calculation_mode in ("frequency", "irc"):
             if single_point_enabled is None:
                 single_point_enabled = False
         else:

@@ -348,6 +348,7 @@ def run_frequency_stage(stage_context, queue_update_fn):
                     queue_update_fn,
                     finalize=False,
                     update_summary=False,
+                    run_single_point=False,
                 )
                 if irc_payload is not None:
                     calculation_metadata["irc"] = irc_payload

@@ -14,15 +14,16 @@ DFTFlow configuration supports `.json`, `.yaml/.yml`, and `.toml`.
 | `optimizer` | Optimization settings (`mode`, `ase`) |
 | `single_point` | Single-point override settings |
 | `frequency_enabled` | Run frequency after optimization |
-| `single_point_enabled` | Run single-point after optimization or frequency |
+| `single_point_enabled` | Run single-point after optimization, frequency, or IRC |
 | `irc_enabled` | Run IRC after optimization or frequency |
 | `scan` / `scan2d` | Scan settings (`dimensions`, `mode`, `executor`) |
 | `ts_quality` | TS quality checks (`enforce`, etc.) |
 | `threads`, `memory_gb` | Resource settings |
 | `io` | Write intervals (`scan_write_interval_points`, etc.) |
 
-With `calculation_mode: frequency`, `irc_enabled` and `single_point_enabled` trigger
-optional follow-up steps after the frequency calculation.
+With `calculation_mode: frequency`, `irc_enabled` and `single_point_enabled` control
+optional follow-ups after the frequency calculation. With `calculation_mode: irc`,
+`single_point_enabled` controls the optional single-point after IRC.
 
 ## Basic Example (Optimization + Frequency + Single-Point)
 

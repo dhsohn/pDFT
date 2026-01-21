@@ -5,13 +5,26 @@ import os
 import time
 
 from ase_backend import _run_ase_irc
+from run_opt_engine import compute_single_point_energy
 from run_opt_metadata import format_xyz_comment, write_checkpoint, write_xyz_snapshot
 from run_opt_resources import resolve_run_path
 from .events import finalize_metadata
-from .utils import _atoms_to_atom_spec, _evaluate_irc_profile
+from .utils import (
+    _atoms_to_atom_spec,
+    _evaluate_irc_profile,
+    _resolve_d3_params,
+    _update_checkpoint_scf,
+)
 
 
-def run_irc_stage(stage_context, queue_update_fn, *, finalize=True, update_summary=True):
+def run_irc_stage(
+    stage_context,
+    queue_update_fn,
+    *,
+    finalize=True,
+    update_summary=True,
+    run_single_point=True,
+):
     logging.info("Starting IRC calculation...")
     run_start = stage_context["run_start"]
     calculation_metadata = stage_context["metadata"]
@@ -33,6 +46,7 @@ def run_irc_stage(stage_context, queue_update_fn, *, finalize=True, update_summa
         snapshot_mode = "all"
     snapshot_write_steps = snapshot_mode == "all"
     snapshot_write_last = snapshot_mode in ("all", "last")
+    single_point_enabled = bool(stage_context.get("single_point_enabled")) and run_single_point
 
     snapshot_dir = resolve_run_path(run_dir, "snapshots")
     forward_steps_snapshot = resolve_run_path(
@@ -344,20 +358,78 @@ def run_irc_stage(stage_context, queue_update_fn, *, finalize=True, update_summa
             calculation_metadata.setdefault("profiling", {})["irc"] = irc_payload.get(
                 "profiling"
             )
+        sp_result = None
+        sp_status = "skipped"
+        sp_skip_reason = None
+        if single_point_enabled:
+            if irc_payload.get("status") != "completed":
+                sp_skip_reason = "IRC did not complete; skipping single-point."
+            else:
+                logging.info("Calculating single-point energy after IRC...")
+                try:
+                    sp_result = compute_single_point_energy(
+                        stage_context["mol"],
+                        stage_context["calc_basis"],
+                        stage_context["calc_xc"],
+                        stage_context["calc_scf_config"],
+                        stage_context["calc_solvent_model"],
+                        stage_context["calc_solvent_name"],
+                        stage_context["calc_eps"],
+                        stage_context["calc_dispersion_model"],
+                        _resolve_d3_params(stage_context.get("optimizer_ase_config")),
+                        stage_context["verbose"],
+                        stage_context["memory_mb"],
+                        run_dir=stage_context["run_dir"],
+                        optimizer_mode=stage_context["optimizer_mode"],
+                        multiplicity=multiplicity,
+                        log_override=False,
+                        profiling_enabled=profiling_enabled,
+                    )
+                    sp_status = "executed"
+                    sp_skip_reason = None
+                    if isinstance(calculation_metadata.get("single_point"), dict):
+                        calculation_metadata["single_point"][
+                            "dispersion_info"
+                        ] = sp_result.get("dispersion")
+                        if profiling_enabled and sp_result.get("profiling") is not None:
+                            calculation_metadata["single_point"]["profiling"] = sp_result.get(
+                                "profiling"
+                            )
+                    _update_checkpoint_scf(
+                        stage_context.get("checkpoint_path"),
+                        pyscf_chkfile=stage_context.get("pyscf_chkfile"),
+                        scf_energy=sp_result.get("energy"),
+                        scf_converged=sp_result.get("converged"),
+                    )
+                except Exception:
+                    logging.exception("Single-point calculation failed.")
+                    sp_result = None
+                    sp_status = "failed"
+                    sp_skip_reason = "Single-point calculation failed."
+        elif run_single_point:
+            logging.info("Skipping single-point energy calculation (disabled).")
+            sp_skip_reason = "Single-point calculation disabled."
+
+        if run_single_point and isinstance(calculation_metadata.get("single_point"), dict):
+            calculation_metadata["single_point"]["status"] = sp_status
+            calculation_metadata["single_point"]["skip_reason"] = sp_skip_reason
         energy_summary = None
         if irc_payload["profile"]:
             energy_summary = {
                 "start_energy_ev": irc_payload["profile"][0]["energy_ev"],
                 "end_energy_ev": irc_payload["profile"][-1]["energy_ev"],
             }
+        final_sp_energy = sp_result.get("energy") if sp_result else None
+        final_sp_converged = sp_result.get("converged") if sp_result else None
+        final_sp_cycles = sp_result.get("cycles") if sp_result else None
         summary = {
             "elapsed_seconds": time.perf_counter() - run_start,
             "n_steps": len(irc_payload["profile"]),
             "final_energy": energy_summary["end_energy_ev"] if energy_summary else None,
             "opt_final_energy": None,
-            "final_sp_energy": None,
-            "final_sp_converged": None,
-            "final_sp_cycles": None,
+            "final_sp_energy": final_sp_energy,
+            "final_sp_converged": final_sp_converged,
+            "final_sp_cycles": final_sp_cycles,
             "scf_converged": None,
             "opt_converged": None,
             "converged": True,

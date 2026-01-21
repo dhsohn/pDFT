@@ -27,13 +27,16 @@ flowchart TD
   G2 --> G3[optional single-point]
   I --> I1[optional IRC]
   I1 --> I2[optional single-point]
+  J --> J1[optional single-point]
 ```
 
 ## Post-Optimization and Frequency Steps
 
 - `frequency_enabled`: enable frequency after optimization.
 - `irc_enabled`: enable IRC after optimization or frequency.
-- `single_point_enabled`: enable single-point after optimization or frequency.
+- `single_point_enabled`: enable single-point after optimization, frequency, or IRC.
+
+With `calculation_mode: irc`, the optional single-point runs after IRC completes.
 
 ## TS Quality Gating
 
