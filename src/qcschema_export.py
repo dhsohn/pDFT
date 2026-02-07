@@ -12,6 +12,15 @@ from run_opt_resources import ensure_parent_dir
 HARTREE_TO_EV = 27.211386245988
 
 
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _driver_from_mode(calculation_mode: str | None) -> str:
     if calculation_mode == "frequency":
         return "hessian"
@@ -113,15 +122,20 @@ def _resolve_return_result(
     sp_result: Mapping[str, Any] | None,
     frequency_payload: Mapping[str, Any] | None,
 ) -> tuple[float | None, str | None]:
-    if sp_result and sp_result.get("energy") is not None:
-        return float(sp_result.get("energy")), "Hartree"
+    if sp_result:
+        sp_energy = _as_float(sp_result.get("energy"))
+        if sp_energy is not None:
+            return sp_energy, "Hartree"
     if frequency_payload:
         frequency_result = frequency_payload.get("results") or {}
-        if frequency_result.get("energy") is not None:
-            return float(frequency_result.get("energy")), "Hartree"
+        freq_energy = _as_float(frequency_result.get("energy"))
+        if freq_energy is not None:
+            return freq_energy, "Hartree"
     summary = calculation_metadata.get("summary") if isinstance(calculation_metadata, dict) else None
-    if isinstance(summary, dict) and summary.get("final_energy") is not None:
-        final_energy = float(summary.get("final_energy"))
+    if isinstance(summary, dict):
+        final_energy = _as_float(summary.get("final_energy"))
+        if final_energy is None:
+            return None, None
         if calculation_metadata.get("calculation_mode") == "irc":
             return final_energy / HARTREE_TO_EV, "Hartree"
         return final_energy, "Hartree"
@@ -132,8 +146,8 @@ def _build_properties(
     return_result: float | None,
     gradient: Any | None,
 ) -> dict[str, Any]:
-    properties = {}
-    units = {}
+    properties: dict[str, Any] = {}
+    units: dict[str, str] = {}
     if return_result is not None:
         properties["return_energy"] = return_result
         properties["scf_total_energy"] = return_result

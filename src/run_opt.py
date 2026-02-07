@@ -18,6 +18,7 @@ from pathlib import Path
 
 import cli
 import run_queue
+import run_opt_smoke
 import workflow
 from run_opt_config import (
     DEFAULT_QUEUE_LOCK_PATH,
@@ -33,6 +34,7 @@ from run_opt_config import (
 from run_opt_paths import get_runs_base_dir, get_smoke_runs_base_dir
 from run_opt_resources import create_run_directory, maybe_auto_archive_runs
 from run_opt_metadata import compute_text_hash, write_run_metadata
+from run_opt_utils import normalize_solvent_key as _normalize_solvent_key
 
 TERMINAL_RESUME_STATUSES = {"completed", "failed", "timeout", "canceled"}
 
@@ -70,10 +72,6 @@ QUICK_BASIS_SET_OPTIONS = ["6-31g", "def2-svp"]
 QUICK_XC_FUNCTIONAL_OPTIONS = ["b3lyp", "pbe0"]
 QUICK_DISPERSION_MODELS = (None, "d3bj")
 QUICK_SOLVENT_MODELS = (None, "smd")
-
-
-def _normalize_solvent_key(name):
-    return "".join(char for char in str(name).lower() if char.isalnum())
 
 
 def _read_json_file(path: Path) -> dict | None:
@@ -996,381 +994,313 @@ def _apply_scan_cli_overrides(config, args):
     return config
 
 
-def main():
-    """
-    Main function to run the geometry optimization.
-    """
+def _parse_cli_args():
     parser = cli.build_parser()
-    args = parser.parse_args(cli._normalize_cli_args(sys.argv[1:]))
+    normalized_argv = cli._normalize_cli_args(sys.argv[1:])
+    return parser.parse_args(normalized_argv)
 
-    if args.command in ("run", "smoke-test"):
-        try:
-            maybe_auto_archive_runs()
-        except Exception as exc:
-            logging.warning("Auto-archive check failed: %s", exc)
 
+def _maybe_auto_archive(command):
+    if command not in ("run", "smoke-test"):
+        return
     try:
-        if args.command == "doctor":
-            workflow.run_doctor()
-            return
+        maybe_auto_archive_runs()
+    except Exception as exc:
+        logging.warning("Auto-archive check failed: %s", exc)
 
-        if args.command == "scan-point":
-            from workflow.stage_scan import run_scan_point_from_manifest
 
-            run_scan_point_from_manifest(args.manifest, args.index)
-            return
+def _build_run_config_or_raise(config):
+    try:
+        return build_run_config(config)
+    except ValueError as error:
+        message = str(error)
+        print(message, file=sys.stderr)
+        logging.error(message)
+        raise
 
-        if args.command == "queue":
-            if args.queue_command == "status":
-                run_queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
-                run_queue.reconcile_queue_entries(
-                    DEFAULT_QUEUE_PATH, DEFAULT_QUEUE_LOCK_PATH
-                )
-                with run_queue.queue_lock(DEFAULT_QUEUE_LOCK_PATH):
-                    queue_state = run_queue.load_queue(DEFAULT_QUEUE_PATH)
-                run_queue.format_queue_status(queue_state)
-                return
-            if args.queue_command == "cancel":
-                run_queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
-                canceled, error = run_queue.cancel_queue_entry(
-                    DEFAULT_QUEUE_PATH,
-                    DEFAULT_QUEUE_LOCK_PATH,
-                    args.run_id,
-                )
-                if not canceled:
-                    raise ValueError(error)
-                print(f"Canceled queued run: {args.run_id}")
-                return
-            if args.queue_command == "retry":
-                run_queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
-                retried, error = run_queue.requeue_queue_entry(
-                    DEFAULT_QUEUE_PATH,
-                    DEFAULT_QUEUE_LOCK_PATH,
-                    args.run_id,
-                    reason="retry",
-                )
-                if not retried:
-                    raise ValueError(error)
-                print(f"Re-queued run: {args.run_id}")
-                return
-            if args.queue_command == "requeue-failed":
-                run_queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
-                count = run_queue.requeue_failed_entries(
-                    DEFAULT_QUEUE_PATH, DEFAULT_QUEUE_LOCK_PATH
-                )
-                print(f"Re-queued failed runs: {count}")
-                return
-            if args.queue_command == "prune":
-                run_queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
-                run_queue.load_queue(DEFAULT_QUEUE_PATH)
-                removed, remaining = run_queue.prune_queue_entries(
-                    DEFAULT_QUEUE_PATH,
-                    DEFAULT_QUEUE_LOCK_PATH,
-                    args.keep_days,
-                    {"completed", "failed", "timeout", "canceled"},
-                )
-                print(f"Pruned queue entries: {removed} removed, {remaining} remaining.")
-                return
-            if args.queue_command == "archive":
-                run_queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
-                archive_path = run_queue.archive_queue(
-                    DEFAULT_QUEUE_PATH,
-                    DEFAULT_QUEUE_LOCK_PATH,
-                    args.path,
-                )
-                print(f"Archived queue entries to: {archive_path}")
-                return
 
-        if args.command == "status":
-            if args.recent and args.run_path:
-                raise ValueError("--recent cannot be used with a run path.")
-            if args.recent:
-                run_queue.print_recent_statuses(args.recent)
-                return
-            if args.run_path:
-                run_queue.print_status(args.run_path, DEFAULT_RUN_METADATA_PATH)
-                return
-            raise ValueError("status requires a run path or --recent.")
+def _run_doctor_command(_args):
+    workflow.run_doctor()
 
-        if args.command == "list-runs":
-            runs_dir = args.runs_dir or get_runs_base_dir()
-            entries = _load_run_entries(Path(runs_dir), limit=args.limit)
-            payload = {
-                "schema_version": 1,
-                "updated_at": datetime.now().isoformat(),
-                "entries": entries,
-            }
-            print(json.dumps(payload))
-            return
 
-        if args.command == "validate-config":
-            config_path = args.config_path or args.config
-            config_path = Path(config_path).expanduser().resolve()
-            config, _config_raw = load_run_config(config_path)
-            try:
-                build_run_config(config)
-            except ValueError as error:
-                message = str(error)
-                print(message, file=sys.stderr)
-                logging.error(message)
-                raise
-            print(f"Config validation passed: {config_path}")
-            return
+def _run_scan_point_command(args):
+    from workflow.stage_scan import run_scan_point_from_manifest
 
-        if args.command == "smoke-test":
-            if args.watch:
-                if args.resume and not args.run_dir:
-                    raise ValueError("--resume requires --run-dir for smoke-test.")
-                _run_smoke_test_watch(args)
-                return
-            base_config, config_path, modes, cases = _prepare_smoke_test_suite(args)
-            solvent_map_path = base_config.get("solvent_map") or DEFAULT_SOLVENT_MAP_PATH
-            if args.resume and not args.run_dir:
-                raise ValueError("--resume requires --run-dir for smoke-test.")
-            base_run_dir = args.run_dir or create_run_directory(
-                get_smoke_runs_base_dir()
-            )
-            base_run_dir = str(Path(base_run_dir).expanduser().resolve())
-            os.makedirs(base_run_dir, exist_ok=True)
-            xyz_path = Path(base_run_dir) / "smoke_test_water.xyz"
-            xyz_path.write_text(SMOKE_TEST_XYZ, encoding="utf-8")
-            logging.warning("Starting smoke-test resume scan in %s", base_run_dir)
-            coerced = _coerce_smoke_statuses(base_run_dir)
-            if coerced:
-                logging.warning(
-                    "Filled %s missing smoke-test status files from metadata.",
-                    coerced,
-                )
-            else:
-                logging.warning("No missing smoke-test status files detected.")
-            total_cases = len(modes) * len(cases)
-            failures = []
-            case_index = 1
-            for overrides in cases:
-                for mode in modes:
-                    run_dir = _prepare_smoke_test_run_dir(
-                        base_run_dir, mode, overrides, case_index
-                    )
-                    case_index += 1
-                    if args.resume:
-                        inferred_status = _infer_smoke_case_status(run_dir)
-                        if inferred_status in ("completed", "skipped"):
-                            _update_smoke_progress(
-                                base_run_dir, run_dir, inferred_status
-                            )
-                            logging.info(
-                                "Skipping completed smoke-test case: %s",
-                                run_dir,
-                            )
-                            continue
-                        progress_status = _smoke_progress_status(base_run_dir, run_dir)
-                        if progress_status in ("completed", "skipped"):
-                            logging.info(
-                                "Skipping completed smoke-test case: %s",
-                                run_dir,
-                            )
-                            continue
-                        status = _load_smoke_test_status(run_dir)
-                        if status in ("completed", "skipped"):
-                            _update_smoke_progress(base_run_dir, run_dir, status)
-                            logging.info(
-                                "Skipping completed smoke-test case: %s",
-                                run_dir,
-                            )
-                            continue
-                        if status is None:
-                            _coerce_smoke_status_from_metadata(run_dir)
-                    if overrides.get("skip"):
-                        _write_smoke_skip_metadata(
-                            run_dir,
-                            overrides,
-                            mode,
-                            overrides.get("skip_reason"),
-                        )
-                        _update_smoke_progress(base_run_dir, run_dir, "skipped")
-                        logging.warning(
-                            "Skipping smoke-test case due to unsupported dispersion: %s",
-                            run_dir,
-                        )
-                        continue
-                    _update_smoke_progress(base_run_dir, run_dir, "running")
-                    smoke_config = _build_smoke_test_config(base_config, mode, overrides)
-                    smoke_config_raw = json.dumps(
-                        smoke_config, indent=2, ensure_ascii=False
-                    )
-                    smoke_config_path = run_dir / "config_smoke_test.json"
-                    smoke_config_path.write_text(smoke_config_raw, encoding="utf-8")
-                    try:
-                        exit_code = _run_smoke_test_case(
-                            args=args,
-                            run_dir=run_dir,
-                            xyz_path=xyz_path,
-                            solvent_map_path=solvent_map_path,
-                            smoke_config_path=smoke_config_path,
-                            smoke_config_raw=smoke_config_raw,
-                            smoke_config=smoke_config,
-                        )
-                        _ensure_smoke_status_file(run_dir, exit_code)
-                        if exit_code == 0:
-                            _update_smoke_progress(base_run_dir, run_dir, "completed")
-                        if exit_code != 0:
-                            raise RuntimeError(
-                                "Smoke-test subprocess exited with code "
-                                f"{_format_subprocess_returncode(exit_code)}."
-                            )
-                    except Exception as error:
-                        _update_smoke_progress(
-                            base_run_dir, run_dir, "failed", str(error)
-                        )
-                        failures.append(
-                            {
-                                "run_dir": str(run_dir),
-                                "mode": mode,
-                                "basis": overrides["basis"],
-                                "xc": overrides["xc"],
-                                "solvent": overrides["solvent"],
-                                "solvent_model": overrides["solvent_model"],
-                                "dispersion": overrides["dispersion"],
-                                "error": str(error),
-                            }
-                        )
-                        if args.stop_on_error:
-                            print("Smoke test stopped on error.")
-                            print(
-                                "  {mode} {basis} {xc} {solvent_model}/{solvent} "
-                                "{dispersion} -> {run_dir} ({error})".format(
-                                    **failures[-1]
-                                )
-                            )
-                            raise SystemExit(1) from error
-                        continue
-            if failures:
-                print(
-                    "Smoke test completed with failures: "
-                    f"{len(failures)}/{total_cases}"
-                )
-                for failure in failures:
-                    print(
-                        "  {mode} {basis} {xc} {solvent_model}/{solvent} "
-                        "{dispersion} -> {run_dir} ({error})".format(**failure)
-                    )
-                raise SystemExit(1)
-            print(f"Smoke test completed: {base_run_dir} ({total_cases} cases)")
-            return
+    run_scan_point_from_manifest(args.manifest, args.index)
 
-        run_in_background = bool(args.background and not args.no_background)
-        if args.queue_runner:
-            run_queue.run_queue_worker(
-                os.path.abspath(sys.argv[0]),
-                DEFAULT_QUEUE_PATH,
-                DEFAULT_QUEUE_LOCK_PATH,
-                DEFAULT_QUEUE_RUNNER_LOCK_PATH,
-            )
-            return
 
-        if args.resume and args.run_dir:
-            raise ValueError("--resume and --run-dir cannot be used together.")
-        if args.resume and args.scan_dimension:
-            raise ValueError("--scan-dimension cannot be used with --resume.")
-        if args.resume and args.scan_grid:
-            raise ValueError("--scan-grid cannot be used with --resume.")
-        if args.resume and args.scan_mode:
-            raise ValueError("--scan-mode cannot be used with --resume.")
-        if args.resume and args.xyz_file:
-            raise ValueError("xyz_file cannot be provided when using --resume.")
+def _run_queue_command(args):
+    run_queue.ensure_queue_file(DEFAULT_QUEUE_PATH)
+    if args.queue_command == "status":
+        run_queue.reconcile_queue_entries(DEFAULT_QUEUE_PATH, DEFAULT_QUEUE_LOCK_PATH)
+        with run_queue.queue_lock(DEFAULT_QUEUE_LOCK_PATH):
+            queue_state = run_queue.load_queue(DEFAULT_QUEUE_PATH)
+        run_queue.format_queue_status(queue_state)
+        return
+    if args.queue_command == "cancel":
+        canceled, error = run_queue.cancel_queue_entry(
+            DEFAULT_QUEUE_PATH,
+            DEFAULT_QUEUE_LOCK_PATH,
+            args.run_id,
+        )
+        if not canceled:
+            raise ValueError(error)
+        print(f"Canceled queued run: {args.run_id}")
+        return
+    if args.queue_command == "retry":
+        retried, error = run_queue.requeue_queue_entry(
+            DEFAULT_QUEUE_PATH,
+            DEFAULT_QUEUE_LOCK_PATH,
+            args.run_id,
+            reason="retry",
+        )
+        if not retried:
+            raise ValueError(error)
+        print(f"Re-queued run: {args.run_id}")
+        return
+    if args.queue_command == "requeue-failed":
+        count = run_queue.requeue_failed_entries(
+            DEFAULT_QUEUE_PATH, DEFAULT_QUEUE_LOCK_PATH
+        )
+        print(f"Re-queued failed runs: {count}")
+        return
+    if args.queue_command == "prune":
+        run_queue.load_queue(DEFAULT_QUEUE_PATH)
+        removed, remaining = run_queue.prune_queue_entries(
+            DEFAULT_QUEUE_PATH,
+            DEFAULT_QUEUE_LOCK_PATH,
+            args.keep_days,
+            {"completed", "failed", "timeout", "canceled"},
+        )
+        print(f"Pruned queue entries: {removed} removed, {remaining} remaining.")
+        return
+    if args.queue_command == "archive":
+        archive_path = run_queue.archive_queue(
+            DEFAULT_QUEUE_PATH,
+            DEFAULT_QUEUE_LOCK_PATH,
+            args.path,
+        )
+        print(f"Archived queue entries to: {archive_path}")
+        return
+    raise ValueError(f"Unknown queue command: {args.queue_command}")
 
-        config_source_path = None
-        if args.resume:
-            resume_state = _load_resume_checkpoint(args.resume)
-            args.xyz_file = resume_state["xyz_file"]
-            args.run_dir = str(resume_state["resume_dir"])
-            config_raw = resume_state["config_raw"]
-            config_source_path = resume_state["config_source_path"]
-            _check_resume_config_mismatch(
-                resume_state,
-                getattr(args, "resume_config_mismatch", "warn"),
-            )
-            if config_source_path is not None:
-                args.config = str(config_source_path)
-            else:
-                args.config = str(resume_state["checkpoint_path"])
-            try:
-                config = json.loads(config_raw)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid config JSON in resume data: {exc}") from exc
+
+def _run_status_command(args):
+    if args.recent and args.run_path:
+        raise ValueError("--recent cannot be used with a run path.")
+    if args.recent:
+        run_queue.print_recent_statuses(args.recent)
+        return
+    if args.run_path:
+        run_queue.print_status(args.run_path, DEFAULT_RUN_METADATA_PATH)
+        return
+    raise ValueError("status requires a run path or --recent.")
+
+
+def _run_list_runs_command(args):
+    runs_dir = args.runs_dir or get_runs_base_dir()
+    entries = _load_run_entries(Path(runs_dir), limit=args.limit)
+    payload = {
+        "schema_version": 1,
+        "updated_at": datetime.now().isoformat(),
+        "entries": entries,
+    }
+    print(json.dumps(payload))
+
+
+def _run_validate_config_command(args):
+    config_path = Path(args.config_path or args.config).expanduser().resolve()
+    config, _config_raw = load_run_config(config_path)
+    _build_run_config_or_raise(config)
+    print(f"Config validation passed: {config_path}")
+
+
+def _run_smoke_test_command(args):
+    deps = run_opt_smoke.SmokeCommandDeps(
+        default_solvent_map_path=DEFAULT_SOLVENT_MAP_PATH,
+        smoke_test_xyz=SMOKE_TEST_XYZ,
+        get_smoke_runs_base_dir=get_smoke_runs_base_dir,
+        create_run_directory=create_run_directory,
+        prepare_smoke_test_suite=_prepare_smoke_test_suite,
+        run_smoke_test_watch=_run_smoke_test_watch,
+        coerce_smoke_statuses=_coerce_smoke_statuses,
+        prepare_smoke_test_run_dir=_prepare_smoke_test_run_dir,
+        infer_smoke_case_status=_infer_smoke_case_status,
+        update_smoke_progress=_update_smoke_progress,
+        smoke_progress_status=_smoke_progress_status,
+        load_smoke_test_status=_load_smoke_test_status,
+        coerce_smoke_status_from_metadata=_coerce_smoke_status_from_metadata,
+        write_smoke_skip_metadata=_write_smoke_skip_metadata,
+        build_smoke_test_config=_build_smoke_test_config,
+        run_smoke_test_case=_run_smoke_test_case,
+        ensure_smoke_status_file=_ensure_smoke_status_file,
+        format_subprocess_returncode=_format_subprocess_returncode,
+    )
+    run_opt_smoke.run_smoke_test_command(args, deps)
+
+
+def _dispatch_non_run_command(args):
+    handlers = {
+        "doctor": _run_doctor_command,
+        "scan-point": _run_scan_point_command,
+        "queue": _run_queue_command,
+        "status": _run_status_command,
+        "list-runs": _run_list_runs_command,
+        "validate-config": _run_validate_config_command,
+        "smoke-test": _run_smoke_test_command,
+    }
+    handler = handlers.get(args.command)
+    if handler is None:
+        return False
+    handler(args)
+    return True
+
+
+def _validate_run_cli_args(args):
+    if args.resume and args.run_dir:
+        raise ValueError("--resume and --run-dir cannot be used together.")
+    if args.resume and args.scan_dimension:
+        raise ValueError("--scan-dimension cannot be used with --resume.")
+    if args.resume and args.scan_grid:
+        raise ValueError("--scan-grid cannot be used with --resume.")
+    if args.resume and args.scan_mode:
+        raise ValueError("--scan-mode cannot be used with --resume.")
+    if args.resume and args.xyz_file:
+        raise ValueError("xyz_file cannot be provided when using --resume.")
+
+
+def _load_run_command_config(args):
+    config_source_path = None
+    if args.resume:
+        resume_state = _load_resume_checkpoint(args.resume)
+        args.xyz_file = resume_state["xyz_file"]
+        args.run_dir = str(resume_state["resume_dir"])
+        config_raw = resume_state["config_raw"]
+        config_source_path = resume_state["config_source_path"]
+        _check_resume_config_mismatch(
+            resume_state,
+            getattr(args, "resume_config_mismatch", "warn"),
+        )
+        if config_source_path is not None:
+            args.config = str(config_source_path)
         else:
-            if not args.xyz_file:
-                raise ValueError("xyz_file is required unless --resume is used.")
-            config_path = Path(args.config).expanduser().resolve()
-            config, config_raw = load_run_config(config_path)
-            args.config = str(config_path)
-            config_source_path = config_path
-        if args.scan_dimension or args.scan_grid or args.scan_mode:
-            config = _apply_scan_cli_overrides(config, args)
-            config_raw = json.dumps(config, indent=2, ensure_ascii=False)
-        if args.scan_result_csv:
-            config = dict(config)
-            config["scan_result_csv_file"] = args.scan_result_csv
-            config_raw = json.dumps(config, indent=2, ensure_ascii=False)
+            args.config = str(resume_state["checkpoint_path"])
+        try:
+            config = json.loads(config_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid config JSON in resume data: {exc}") from exc
+    else:
+        if not args.xyz_file:
+            raise ValueError("xyz_file is required unless --resume is used.")
+        config_path = Path(args.config).expanduser().resolve()
+        config, config_raw = load_run_config(config_path)
+        args.config = str(config_path)
+        config_source_path = config_path
+    return config, config_raw, config_source_path
 
-        try:
-            config = build_run_config(config)
-        except ValueError as error:
-            message = str(error)
-            print(message, file=sys.stderr)
-            logging.error(message)
-            raise
-        if args.resume:
-            metadata_candidate = config.run_metadata_file or DEFAULT_RUN_METADATA_PATH
-            if os.path.isabs(metadata_candidate):
-                run_metadata_path = Path(metadata_candidate)
-            else:
-                run_metadata_path = Path(args.run_dir) / metadata_candidate
-            previous_status = _load_resume_status(str(run_metadata_path))
-            args.resume_previous_status = previous_status
-            if previous_status in TERMINAL_RESUME_STATUSES and not args.force_resume:
-                raise ValueError(
-                    "Refusing to resume a {status} run without --force-resume.".format(
-                        status=previous_status
-                    )
-                )
-            if previous_status in TERMINAL_RESUME_STATUSES and args.force_resume:
-                print(
-                    "Warning: resuming a {status} run with --force-resume.".format(
-                        status=previous_status
-                    ),
-                    file=sys.stderr,
-                )
-        smoke_status_path = os.environ.get("DFTFLOW_SMOKE_STATUS_PATH")
-        smoke_heartbeat_path = os.environ.get("DFTFLOW_SMOKE_HEARTBEAT_PATH")
-        heartbeat_interval = os.environ.get("DFTFLOW_SMOKE_HEARTBEAT_INTERVAL")
-        exit_code = 1
-        stop_heartbeat = None
-        if smoke_heartbeat_path:
-            interval = SMOKE_TEST_HEARTBEAT_INTERVAL
-            if heartbeat_interval:
-                try:
-                    interval = max(1, int(heartbeat_interval))
-                except ValueError:
-                    interval = SMOKE_TEST_HEARTBEAT_INTERVAL
-            stop_heartbeat = _start_smoke_heartbeat(smoke_heartbeat_path, interval)
-        try:
-            workflow.run(
-                args, config, config_raw, config_source_path, run_in_background
+
+def _apply_run_cli_config_overrides(config, config_raw, args):
+    if args.scan_dimension or args.scan_grid or args.scan_mode:
+        config = _apply_scan_cli_overrides(config, args)
+        config_raw = json.dumps(config, indent=2, ensure_ascii=False)
+    if args.scan_result_csv:
+        config = dict(config)
+        config["scan_result_csv_file"] = args.scan_result_csv
+        config_raw = json.dumps(config, indent=2, ensure_ascii=False)
+    return config, config_raw
+
+
+def _apply_resume_status_guard(args, config):
+    if not args.resume:
+        return
+    metadata_candidate = config.run_metadata_file or DEFAULT_RUN_METADATA_PATH
+    if os.path.isabs(metadata_candidate):
+        run_metadata_path = Path(metadata_candidate)
+    else:
+        run_metadata_path = Path(args.run_dir) / metadata_candidate
+    previous_status = _load_resume_status(str(run_metadata_path))
+    args.resume_previous_status = previous_status
+    if previous_status in TERMINAL_RESUME_STATUSES and not args.force_resume:
+        raise ValueError(
+            "Refusing to resume a {status} run without --force-resume.".format(
+                status=previous_status
             )
-            exit_code = 0
-        finally:
-            if stop_heartbeat:
-                stop_heartbeat.set()
-            if smoke_status_path:
-                try:
-                    _write_smoke_status_path(smoke_status_path, exit_code)
-                except OSError as exc:
-                    logging.warning(
-                        "Failed to write smoke-test status in %s: %s",
-                        smoke_status_path,
-                        exc,
-                    )
+        )
+    if previous_status in TERMINAL_RESUME_STATUSES and args.force_resume:
+        print(
+            "Warning: resuming a {status} run with --force-resume.".format(
+                status=previous_status
+            ),
+            file=sys.stderr,
+        )
+
+
+def _run_workflow_with_smoke_signals(
+    args, config, config_raw, config_source_path, run_in_background
+):
+    smoke_status_path = os.environ.get("DFTFLOW_SMOKE_STATUS_PATH")
+    smoke_heartbeat_path = os.environ.get("DFTFLOW_SMOKE_HEARTBEAT_PATH")
+    heartbeat_interval = os.environ.get("DFTFLOW_SMOKE_HEARTBEAT_INTERVAL")
+    exit_code = 1
+    stop_heartbeat = None
+    if smoke_heartbeat_path:
+        interval = SMOKE_TEST_HEARTBEAT_INTERVAL
+        if heartbeat_interval:
+            try:
+                interval = max(1, int(heartbeat_interval))
+            except ValueError:
+                interval = SMOKE_TEST_HEARTBEAT_INTERVAL
+        stop_heartbeat = _start_smoke_heartbeat(smoke_heartbeat_path, interval)
+    try:
+        workflow.run(args, config, config_raw, config_source_path, run_in_background)
+        exit_code = 0
+    finally:
+        if stop_heartbeat:
+            stop_heartbeat.set()
+        if smoke_status_path:
+            try:
+                _write_smoke_status_path(smoke_status_path, exit_code)
+            except OSError as exc:
+                logging.warning(
+                    "Failed to write smoke-test status in %s: %s",
+                    smoke_status_path,
+                    exc,
+                )
+
+
+def _run_command(args):
+    run_in_background = bool(args.background and not args.no_background)
+    if args.queue_runner:
+        run_queue.run_queue_worker(
+            os.path.abspath(sys.argv[0]),
+            DEFAULT_QUEUE_PATH,
+            DEFAULT_QUEUE_LOCK_PATH,
+            DEFAULT_QUEUE_RUNNER_LOCK_PATH,
+        )
+        return
+
+    _validate_run_cli_args(args)
+    config, config_raw, config_source_path = _load_run_command_config(args)
+    config, config_raw = _apply_run_cli_config_overrides(config, config_raw, args)
+    config = _build_run_config_or_raise(config)
+    _apply_resume_status_guard(args, config)
+    _run_workflow_with_smoke_signals(
+        args,
+        config,
+        config_raw,
+        config_source_path,
+        run_in_background,
+    )
+
+
+def main():
+    """Main function to run the geometry optimization."""
+    args = _parse_cli_args()
+    _maybe_auto_archive(args.command)
+    try:
+        if _dispatch_non_run_command(args):
+            return
+        _run_command(args)
     except Exception:
         logging.exception("Run failed.")
         raise

@@ -11,6 +11,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 import yaml
 
 from run_opt_paths import get_app_base_dir, get_runs_base_dir
+from run_opt_utils import normalize_constraints, normalize_solvent_key
 
 DEFAULT_CHARGE = 0
 DEFAULT_SPIN = None
@@ -32,11 +33,6 @@ DEFAULT_SCAN_RESULT_CSV_PATH = "scan_result.csv"
 DEFAULT_SCF_CHKFILE = "scf.chk"
 DEFAULT_CONFIG_USED_PATH = "config_used.json"
 
-
-def _normalize_solvent_key(name):
-    return "".join(char for char in str(name).lower() if char.isalnum())
-
-
 SMD_UNSUPPORTED_SOLVENTS = (
     "propylene carbonate",
     "dimethyl carbonate",
@@ -45,7 +41,7 @@ SMD_UNSUPPORTED_SOLVENTS = (
     "n-methyl-2-pyrrolidinone",
 )
 SMD_UNSUPPORTED_SOLVENT_KEYS = {
-    _normalize_solvent_key(name) for name in SMD_UNSUPPORTED_SOLVENTS
+    normalize_solvent_key(name) for name in SMD_UNSUPPORTED_SOLVENTS
 }
 
 DEFAULT_APP_BASE_DIR = get_app_base_dir()
@@ -512,779 +508,656 @@ def _schema_example_for_path(path):
     return RUN_CONFIG_EXAMPLES.get(leaf, "See run_config.json for a complete example.")
 
 
-def validate_run_config(config):
-    if not isinstance(config, dict):
-        raise ValueError("Config must be an object/mapping.")
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
 
-    def is_int(value):
-        return isinstance(value, int) and not isinstance(value, bool)
 
-    def is_number(value):
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
-    def is_bool(value):
-        return isinstance(value, bool)
 
-    def is_str(value):
-        return isinstance(value, str)
+def _is_bool(value):
+    return isinstance(value, bool)
 
-    def is_diis(value):
-        return isinstance(value, (bool, int))
 
-    def is_dict(value):
-        return isinstance(value, dict)
+def _is_str(value):
+    return isinstance(value, str)
 
-    def is_positive_int(value):
-        return is_int(value) and value > 0
 
-    def is_positive_number(value):
-        return is_number(value) and value > 0
+def _is_diis(value):
+    return isinstance(value, (bool, int))
 
-    def is_snapshot_mode(value):
-        return is_str(value) and value.lower() in ("none", "last", "all")
 
-    def normalize_calc_mode(value):
-        if not value:
-            return None
-        normalized = re.sub(r"[\s_\-]+", "", str(value)).lower()
-        if normalized in (
-            "optimization",
-            "opt",
-            "geometry",
-            "geom",
-            "structure",
-            "structureoptimization",
-        ):
-            return "optimization"
-        if normalized in (
-            "singlepoint",
-            "singlepointenergy",
-            "singlepointenergycalculation",
-            "singlepointenergycalc",
-            "singlepointcalc",
-            "single_point",
-            "single",
-            "sp",
-        ):
-            return "single_point"
-        if normalized in (
-            "frequency",
-            "frequencies",
-            "freq",
-            "vibration",
-            "vibrational",
-        ):
-            return "frequency"
-        if normalized in (
-            "irc",
-            "intrinsicreactioncoordinate",
-            "reactionpath",
-            "reactioncoordinate",
-        ):
-            return "irc"
-        if normalized in ("scan", "scanning"):
-            return "scan"
+def _is_dict(value):
+    return isinstance(value, dict)
+
+
+def _is_positive_int(value):
+    return _is_int(value) and value > 0
+
+
+def _is_positive_number(value):
+    return _is_number(value) and value > 0
+
+
+def _is_snapshot_mode(value):
+    return _is_str(value) and value.lower() in ("none", "last", "all")
+
+
+def _normalize_calc_mode(value):
+    if not value:
         return None
+    normalized = re.sub(r"[\s_\-]+", "", str(value)).lower()
+    if normalized in (
+        "optimization",
+        "opt",
+        "geometry",
+        "geom",
+        "structure",
+        "structureoptimization",
+    ):
+        return "optimization"
+    if normalized in (
+        "singlepoint",
+        "singlepointenergy",
+        "singlepointenergycalculation",
+        "singlepointenergycalc",
+        "singlepointcalc",
+        "single_point",
+        "single",
+        "sp",
+    ):
+        return "single_point"
+    if normalized in (
+        "frequency",
+        "frequencies",
+        "freq",
+        "vibration",
+        "vibrational",
+    ):
+        return "frequency"
+    if normalized in (
+        "irc",
+        "intrinsicreactioncoordinate",
+        "reactionpath",
+        "reactioncoordinate",
+    ):
+        return "irc"
+    if normalized in ("scan", "scanning"):
+        return "scan"
+    return None
 
-    scf_retry_presets = {"fast", "default", "stable", "off"}
-    scf_retry_aliases = {
-        "conservative": "fast",
-        "aggressive": "stable",
-        "robust": "stable",
-        "none": "off",
-        "disabled": "off",
+
+SCF_RETRY_PRESETS = {"fast", "default", "stable", "off"}
+SCF_RETRY_ALIASES = {
+    "conservative": "fast",
+    "aggressive": "stable",
+    "robust": "stable",
+    "none": "off",
+    "disabled": "off",
+}
+DIIS_PRESETS = {"fast", "default", "stable", "off"}
+DIIS_ALIASES = {
+    "conservative": "fast",
+    "aggressive": "stable",
+    "robust": "stable",
+    "none": "off",
+    "disabled": "off",
+}
+
+
+TOP_LEVEL_VALIDATION_RULES = {
+    "threads": (_is_positive_int, "Config '{name}' must be a positive integer."),
+    "memory_gb": (
+        _is_positive_number,
+        "Config '{name}' must be a positive number (int or float).",
+    ),
+    "enforce_os_memory_limit": (_is_bool, "Config '{name}' must be a boolean."),
+    "verbose": (_is_bool, "Config '{name}' must be a boolean."),
+    "single_point_enabled": (_is_bool, "Config '{name}' must be a boolean."),
+    "frequency_enabled": (_is_bool, "Config '{name}' must be a boolean."),
+    "irc_enabled": (_is_bool, "Config '{name}' must be a boolean."),
+    "calculation_mode": (_is_str, "Config '{name}' must be a string."),
+    "log_file": (_is_str, "Config '{name}' must be a string path."),
+    "event_log_file": (_is_str, "Config '{name}' must be a string path."),
+    "optimized_xyz_file": (_is_str, "Config '{name}' must be a string path."),
+    "run_metadata_file": (_is_str, "Config '{name}' must be a string path."),
+    "qcschema_output_file": (_is_str, "Config '{name}' must be a string path."),
+    "frequency_file": (_is_str, "Config '{name}' must be a string path."),
+    "irc_file": (_is_str, "Config '{name}' must be a string path."),
+    "irc_profile_csv_file": (_is_str, "Config '{name}' must be a string path."),
+    "scan_result_csv_file": (_is_str, "Config '{name}' must be a string path."),
+    "basis": (_is_str, "Config '{name}' must be a string."),
+    "xc": (_is_str, "Config '{name}' must be a string."),
+    "solvent": (_is_str, "Config '{name}' must be a string."),
+    "solvent_model": (_is_str, "Config '{name}' must be a string."),
+    "solvent_map": (_is_str, "Config '{name}' must be a string path."),
+    "dispersion": (_is_str, "Config '{name}' must be a string."),
+    "spin_mode": (_is_str, "Config '{name}' must be a string."),
+}
+
+
+def _normalize_preset(value, aliases, allowed, label):
+    normalized = re.sub(r"[\s_\-]+", "", str(value)).lower()
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in allowed:
+        allowed_values = ", ".join(sorted(allowed))
+        raise ValueError(
+            "Config '{label}' must be one of: {values}.".format(
+                label=label, values=allowed_values
+            )
+        )
+    return normalized
+
+
+def _validate_smd_solvent_support(solvent_model, solvent, field_label):
+    if not solvent_model:
+        return
+    if str(solvent_model).lower() != "smd":
+        return
+    if not solvent:
+        return
+    if normalize_solvent_key(solvent) in SMD_UNSUPPORTED_SOLVENT_KEYS:
+        raise ValueError(
+            "Config '{field}' uses SMD solvent '{solvent}', which is not supported "
+            "by PySCF SMD. Use PCM or choose another solvent.".format(
+                field=field_label, solvent=solvent
+            )
+        )
+
+
+def _validate_scan_dimension(dim, path, require_bounds=True):
+    if not isinstance(dim, dict):
+        raise ValueError(f"Config '{path}' must be an object.")
+    dim_type = dim.get("type")
+    if not isinstance(dim_type, str):
+        raise ValueError(f"Config '{path}.type' must be a string.")
+    if dim_type not in ("bond", "angle", "dihedral"):
+        raise ValueError(
+            f"Config '{path}.type' must be one of: bond, angle, dihedral."
+        )
+    required_indices = {
+        "bond": ("i", "j"),
+        "angle": ("i", "j", "k"),
+        "dihedral": ("i", "j", "k", "l"),
     }
-    diis_presets = {"fast", "default", "stable", "off"}
-    diis_aliases = {
-        "conservative": "fast",
-        "aggressive": "stable",
-        "robust": "stable",
-        "none": "off",
-        "disabled": "off",
-    }
-
-    def normalize_preset(value, aliases, allowed, label):
-        normalized = re.sub(r"[\s_\-]+", "", str(value)).lower()
-        normalized = aliases.get(normalized, normalized)
-        if normalized not in allowed:
-            allowed_values = ", ".join(sorted(allowed))
+    for key in required_indices[dim_type]:
+        value = dim.get(key)
+        if not _is_int(value) or isinstance(value, bool):
             raise ValueError(
-                "Config '{label}' must be one of: {values}.".format(
-                    label=label, values=allowed_values
-                )
+                "Config '{path}.{key}' must be an integer.".format(path=path, key=key)
             )
-        return normalized
-
-    def _validate_smd_solvent_support(solvent_model, solvent, field_label):
-        if not solvent_model:
-            return
-        if str(solvent_model).lower() != "smd":
-            return
-        if not solvent:
-            return
-        if _normalize_solvent_key(solvent) in SMD_UNSUPPORTED_SOLVENT_KEYS:
+        if value < 0:
             raise ValueError(
-                "Config '{field}' uses SMD solvent '{solvent}', which is not supported "
-                "by PySCF SMD. Use PCM or choose another solvent.".format(
-                    field=field_label, solvent=solvent
-                )
+                "Config '{path}.{key}' must be >= 0.".format(path=path, key=key)
             )
-
-    def _validate_scan_dimension(dim, path, require_bounds=True):
-        if not isinstance(dim, dict):
-            raise ValueError(f"Config '{path}' must be an object.")
-        dim_type = dim.get("type")
-        if not isinstance(dim_type, str):
-            raise ValueError(f"Config '{path}.type' must be a string.")
-        if dim_type not in ("bond", "angle", "dihedral"):
-            raise ValueError(
-                f"Config '{path}.type' must be one of: bond, angle, dihedral."
-            )
-        required_indices = {"bond": ("i", "j"), "angle": ("i", "j", "k"), "dihedral": ("i", "j", "k", "l")}
-        for key in required_indices[dim_type]:
+    if require_bounds:
+        for key in ("start", "end", "step"):
             value = dim.get(key)
-            if not is_int(value) or isinstance(value, bool):
+            if not _is_number(value):
                 raise ValueError(
-                    "Config '{path}.{key}' must be an integer.".format(path=path, key=key)
+                    "Config '{path}.{key}' must be a number.".format(path=path, key=key)
                 )
-            if value < 0:
-                raise ValueError(
-                    "Config '{path}.{key}' must be >= 0.".format(path=path, key=key)
-                )
-        if require_bounds:
-            for key in ("start", "end", "step"):
-                value = dim.get(key)
-                if not is_number(value):
-                    raise ValueError(
-                        "Config '{path}.{key}' must be a number.".format(path=path, key=key)
-                    )
-            if dim.get("step") == 0:
-                raise ValueError(f"Config '{path}.step' must be non-zero.")
+        if dim.get("step") == 0:
+            raise ValueError(f"Config '{path}.step' must be non-zero.")
 
-    def _validate_scan_config(scan, name, require_dimensions=False):
-        if not isinstance(scan, dict):
-            raise ValueError(f"Config '{name}' must be an object.")
-        executor_value = scan.get("executor")
-        if executor_value is not None:
-            if not isinstance(executor_value, str):
-                raise ValueError(f"Config '{name}.executor' must be a string.")
-            if executor_value not in ("serial", "local", "manifest"):
+
+def _validate_scan_config(scan, name, require_dimensions=False):
+    if not isinstance(scan, dict):
+        raise ValueError(f"Config '{name}' must be an object.")
+    executor_value = scan.get("executor")
+    if executor_value is not None:
+        if not isinstance(executor_value, str):
+            raise ValueError(f"Config '{name}.executor' must be a string.")
+        if executor_value not in ("serial", "local", "manifest"):
+            raise ValueError(
+                "Config '{name}.executor' must be one of: serial, local, manifest.".format(
+                    name=name
+                )
+            )
+    max_workers = scan.get("max_workers")
+    if max_workers is not None:
+        if not _is_int(max_workers) or max_workers < 1:
+            raise ValueError(
+                "Config '{name}.max_workers' must be a positive integer.".format(
+                    name=name
+                )
+            )
+    threads_per_worker = scan.get("threads_per_worker")
+    if threads_per_worker is not None:
+        if not _is_int(threads_per_worker) or threads_per_worker < 1:
+            raise ValueError(
+                "Config '{name}.threads_per_worker' must be a positive integer.".format(
+                    name=name
+                )
+            )
+    batch_size = scan.get("batch_size")
+    if batch_size is not None:
+        if not _is_int(batch_size) or batch_size < 1:
+            raise ValueError(
+                "Config '{name}.batch_size' must be a positive integer.".format(
+                    name=name
+                )
+            )
+    manifest_file = scan.get("manifest_file")
+    if manifest_file is not None and not isinstance(manifest_file, str):
+        raise ValueError(f"Config '{name}.manifest_file' must be a string.")
+    mode_value = scan.get("mode")
+    if mode_value is not None:
+        if not isinstance(mode_value, str):
+            raise ValueError(f"Config '{name}.mode' must be a string.")
+        if mode_value not in ("optimization", "single_point"):
+            raise ValueError(
+                f"Config '{name}.mode' must be one of: optimization, single_point."
+            )
+    dimensions = scan.get("dimensions")
+    grid = scan.get("grid")
+    if require_dimensions or dimensions is not None:
+        if not isinstance(dimensions, list) or not dimensions:
+            raise ValueError(f"Config '{name}.dimensions' must be a non-empty list.")
+        if name == "scan2d" and len(dimensions) != 2:
+            raise ValueError("Config 'scan2d.dimensions' must have exactly 2 entries.")
+        require_bounds = grid is None
+        for idx, dim in enumerate(dimensions):
+            _validate_scan_dimension(dim, f"{name}.dimensions[{idx}]", require_bounds)
+        if grid is not None:
+            if not isinstance(grid, list):
+                raise ValueError(f"Config '{name}.grid' must be a list.")
+            if len(grid) != len(dimensions):
                 raise ValueError(
-                    "Config '{name}.executor' must be one of: serial, local, manifest.".format(
+                    "Config '{name}.grid' length must match dimensions.".format(
                         name=name
                     )
                 )
-        max_workers = scan.get("max_workers")
-        if max_workers is not None:
-            if not is_int(max_workers) or max_workers < 1:
-                raise ValueError(
-                    "Config '{name}.max_workers' must be a positive integer.".format(
-                        name=name
-                    )
-                )
-        threads_per_worker = scan.get("threads_per_worker")
-        if threads_per_worker is not None:
-            if not is_int(threads_per_worker) or threads_per_worker < 1:
-                raise ValueError(
-                    "Config '{name}.threads_per_worker' must be a positive integer.".format(
-                        name=name
-                    )
-                )
-        batch_size = scan.get("batch_size")
-        if batch_size is not None:
-            if not is_int(batch_size) or batch_size < 1:
-                raise ValueError(
-                    "Config '{name}.batch_size' must be a positive integer.".format(
-                        name=name
-                    )
-                )
-        manifest_file = scan.get("manifest_file")
-        if manifest_file is not None and not isinstance(manifest_file, str):
-            raise ValueError(f"Config '{name}.manifest_file' must be a string.")
-        mode_value = scan.get("mode")
-        if mode_value is not None:
-            if not isinstance(mode_value, str):
-                raise ValueError(f"Config '{name}.mode' must be a string.")
-            if mode_value not in ("optimization", "single_point"):
-                raise ValueError(
-                    f"Config '{name}.mode' must be one of: optimization, single_point."
-                )
-        dimensions = scan.get("dimensions")
-        grid = scan.get("grid")
-        if require_dimensions or dimensions is not None:
-            if not isinstance(dimensions, list) or not dimensions:
-                raise ValueError(f"Config '{name}.dimensions' must be a non-empty list.")
-            if name == "scan2d" and len(dimensions) != 2:
-                raise ValueError("Config 'scan2d.dimensions' must have exactly 2 entries.")
-            require_bounds = grid is None
-            for idx, dim in enumerate(dimensions):
-                _validate_scan_dimension(dim, f"{name}.dimensions[{idx}]", require_bounds)
-            if grid is not None:
-                if not isinstance(grid, list):
-                    raise ValueError(f"Config '{name}.grid' must be a list.")
-                if len(grid) != len(dimensions):
+            for idx, values in enumerate(grid):
+                if not isinstance(values, list) or not values:
                     raise ValueError(
-                        "Config '{name}.grid' length must match dimensions.".format(
-                            name=name
+                        "Config '{name}.grid[{idx}]' must be a non-empty list.".format(
+                            name=name, idx=idx
                         )
                     )
-                for idx, values in enumerate(grid):
-                    if not isinstance(values, list) or not values:
+                for value in values:
+                    if not _is_number(value):
                         raise ValueError(
-                            "Config '{name}.grid[{idx}]' must be a non-empty list.".format(
+                            "Config '{name}.grid[{idx}]' must contain numbers.".format(
                                 name=name, idx=idx
                             )
                         )
-                    for value in values:
-                        if not is_number(value):
+        return
+    _validate_scan_dimension(scan, name, require_bounds=True)
+
+
+def _validate_scf_extra(extra, name):
+    if extra is None:
+        return
+    if not isinstance(extra, dict):
+        raise ValueError(f"Config '{name}.extra' must be an object.")
+    allowed_keys = {"grids", "density_fit", "init_guess"}
+    unknown = set(extra) - allowed_keys
+    if unknown:
+        unknown_list = ", ".join(sorted(unknown))
+        raise ValueError(
+            "Config '{name}.extra' has unsupported keys: {keys}. "
+            "Allowed keys: grids, density_fit, init_guess, grids.level, grids.prune.".format(
+                name=name, keys=unknown_list
+            )
+        )
+    if "grids" in extra:
+        grids = extra.get("grids")
+        if not isinstance(grids, dict):
+            raise ValueError(f"Config '{name}.extra.grids' must be an object.")
+        allowed_grid_keys = {"level", "prune"}
+        grid_unknown = set(grids) - allowed_grid_keys
+        if grid_unknown:
+            grid_unknown_list = ", ".join(sorted(grid_unknown))
+            raise ValueError(
+                "Config '{name}.extra.grids' has unsupported keys: {keys}. "
+                "Allowed keys: level, prune.".format(name=name, keys=grid_unknown_list)
+            )
+
+
+def _validate_optimizer_config(config):
+    if "optimizer" not in config or config["optimizer"] is None:
+        return
+    if not isinstance(config["optimizer"], dict):
+        raise ValueError("Config 'optimizer' must be an object.")
+    optimizer_rules = {
+        "output_xyz": (_is_str, "Config '{name}' must be a string path."),
+        "mode": (_is_str, "Config '{name}' must be a string."),
+    }
+    _validate_fields(config["optimizer"], optimizer_rules, prefix="optimizer.")
+    if "ase" in config["optimizer"] and config["optimizer"]["ase"] is not None:
+        if not isinstance(config["optimizer"]["ase"], dict):
+            raise ValueError("Config 'optimizer.ase' must be an object.")
+        ase_config = config["optimizer"]["ase"]
+        for backend_key in ("d3_backend", "dftd3_backend"):
+            backend_value = ase_config.get(backend_key)
+            if backend_value is None:
+                continue
+            if not isinstance(backend_value, str):
+                raise ValueError(
+                    f"Config 'optimizer.ase.{backend_key}' must be a string."
+                )
+            if backend_value != "dftd3":
+                raise ValueError(
+                    "Config 'optimizer.ase.{name}' must be 'dftd3'.".format(
+                        name=backend_key
+                    )
+                )
+        d3_params = ase_config.get("d3_params")
+        dftd3_params = ase_config.get("dftd3_params")
+        if d3_params is not None and dftd3_params is not None:
+            raise ValueError(
+                "Config must not define both 'optimizer.ase.d3_params' and "
+                "'optimizer.ase.dftd3_params'."
+            )
+        if d3_params is not None:
+            chosen_params = d3_params
+            param_prefix = "optimizer.ase.d3_params"
+        else:
+            chosen_params = dftd3_params
+            param_prefix = "optimizer.ase.dftd3_params"
+        if chosen_params is not None:
+            if not isinstance(chosen_params, dict):
+                raise ValueError(
+                    f"Config '{param_prefix}' must be an object/mapping."
+                )
+            for key, value in chosen_params.items():
+                if key == "damping" and isinstance(value, dict):
+                    for subkey, subvalue in value.items():
+                        if subkey in ("damping", "variant", "method"):
+                            if not isinstance(subvalue, str):
+                                raise ValueError(
+                                    f"Config '{param_prefix}.damping.{subkey}' must be a string."
+                                )
+                            continue
+                        if subkey == "parameters" and isinstance(subvalue, dict):
+                            for param_key, param_value in subvalue.items():
+                                if not _is_number(param_value):
+                                    raise ValueError(
+                                        "Config '{prefix}.damping.parameters.{name}' "
+                                        "must be a number.".format(
+                                            prefix=param_prefix, name=param_key
+                                        )
+                                    )
+                            continue
+                        if not _is_number(subvalue):
                             raise ValueError(
-                                "Config '{name}.grid[{idx}]' must contain numbers.".format(
-                                    name=name, idx=idx
+                                "Config '{prefix}.damping.{name}' "
+                                "must be a number.".format(prefix=param_prefix, name=subkey)
+                            )
+                    continue
+                if key == "parameters" and isinstance(value, dict):
+                    for param_key, param_value in value.items():
+                        if not _is_number(param_value):
+                            raise ValueError(
+                                "Config '{prefix}.parameters.{name}' must be a number.".format(
+                                    prefix=param_prefix, name=param_key
                                 )
                             )
-            return
-        _validate_scan_dimension(scan, name, require_bounds=True)
-
-    def _validate_scf_extra(extra, name):
-        if extra is None:
-            return
-        if not isinstance(extra, dict):
-            raise ValueError(f"Config '{name}.extra' must be an object.")
-        allowed_keys = {"grids", "density_fit", "init_guess"}
-        unknown = set(extra) - allowed_keys
-        if unknown:
-            unknown_list = ", ".join(sorted(unknown))
-            raise ValueError(
-                "Config '{name}.extra' has unsupported keys: {keys}. "
-                "Allowed keys: grids, density_fit, init_guess, grids.level, grids.prune.".format(
-                    name=name, keys=unknown_list
-                )
-            )
-        if "grids" in extra:
-            grids = extra.get("grids")
-            if not isinstance(grids, dict):
-                raise ValueError(f"Config '{name}.extra.grids' must be an object.")
-            allowed_grid_keys = {"level", "prune"}
-            grid_unknown = set(grids) - allowed_grid_keys
-            if grid_unknown:
-                grid_unknown_list = ", ".join(sorted(grid_unknown))
-                raise ValueError(
-                    "Config '{name}.extra.grids' has unsupported keys: {keys}. "
-                    "Allowed keys: level, prune.".format(name=name, keys=grid_unknown_list)
-                )
-
-    validation_rules = {
-        "threads": (is_positive_int, "Config '{name}' must be a positive integer."),
-        "memory_gb": (is_positive_number, "Config '{name}' must be a positive number (int or float)."),
-        "enforce_os_memory_limit": (is_bool, "Config '{name}' must be a boolean."),
-        "verbose": (is_bool, "Config '{name}' must be a boolean."),
-        "single_point_enabled": (is_bool, "Config '{name}' must be a boolean."),
-        "frequency_enabled": (is_bool, "Config '{name}' must be a boolean."),
-        "irc_enabled": (is_bool, "Config '{name}' must be a boolean."),
-        "calculation_mode": (is_str, "Config '{name}' must be a string."),
-        "log_file": (is_str, "Config '{name}' must be a string path."),
-        "event_log_file": (is_str, "Config '{name}' must be a string path."),
-        "optimized_xyz_file": (is_str, "Config '{name}' must be a string path."),
-        "run_metadata_file": (is_str, "Config '{name}' must be a string path."),
-        "qcschema_output_file": (is_str, "Config '{name}' must be a string path."),
-        "frequency_file": (is_str, "Config '{name}' must be a string path."),
-        "irc_file": (is_str, "Config '{name}' must be a string path."),
-        "irc_profile_csv_file": (is_str, "Config '{name}' must be a string path."),
-        "scan_result_csv_file": (is_str, "Config '{name}' must be a string path."),
-        "basis": (is_str, "Config '{name}' must be a string."),
-        "xc": (is_str, "Config '{name}' must be a string."),
-        "solvent": (is_str, "Config '{name}' must be a string."),
-        "solvent_model": (is_str, "Config '{name}' must be a string."),
-        "solvent_map": (is_str, "Config '{name}' must be a string path."),
-        "dispersion": (is_str, "Config '{name}' must be a string."),
-        "spin_mode": (is_str, "Config '{name}' must be a string."),
-    }
-    _validate_fields(config, validation_rules)
-    for required_key in ("basis", "xc", "solvent"):
-        if config.get(required_key) in (None, ""):
-            raise ValueError(
-                "Config '{name}' is required. Example: {example}.".format(
-                    name=required_key,
-                    example=_schema_example_for_path(required_key),
-                )
-            )
-    calculation_mode = config.get("calculation_mode")
-    if calculation_mode is not None:
-        allowed_modes = ("optimization", "single_point", "frequency", "irc", "scan")
-        if calculation_mode not in allowed_modes:
-            allowed_values = ", ".join(allowed_modes)
-            raise ValueError(
-                "Config 'calculation_mode' must be one of: {values}. "
-                "Example: {example}.".format(
-                    values=allowed_values,
-                    example=_schema_example_for_path("calculation_mode"),
-                )
-            )
-    spin_mode = config.get("spin_mode")
-    if spin_mode is not None:
-        allowed_spin_modes = ("auto", "strict")
-        if spin_mode not in allowed_spin_modes:
-            allowed_values = ", ".join(allowed_spin_modes)
-            raise ValueError(
-                "Config 'spin_mode' must be one of: {values}. "
-                "Example: {example}.".format(
-                    values=allowed_values,
-                    example=_schema_example_for_path("spin_mode"),
-                )
-            )
-    dispersion = config.get("dispersion")
-    if dispersion is not None and dispersion not in ("d3bj", "d3zero", "d4"):
-        raise ValueError(
-            "Config 'dispersion' must be one of: d3bj, d3zero, d4. "
-            "Example: {example}.".format(example=_schema_example_for_path("dispersion"))
-        )
-    solvent_model = config.get("solvent_model")
-    if solvent_model:
-        if not isinstance(solvent_model, str):
-            raise ValueError("Config 'solvent_model' must be a string.")
-        if solvent_model not in ("pcm", "smd"):
-            raise ValueError(
-                "Config 'solvent_model' must be one of: pcm, smd. "
-                "Example: \"solvent_model\": \"pcm\"."
-            )
-        if not config.get("solvent"):
-            raise ValueError(
-                "Config 'solvent' is required when 'solvent_model' is set. "
-                "Example: \"solvent\": \"water\"."
-            )
-        _validate_smd_solvent_support(solvent_model, config.get("solvent"), "solvent")
-    if "optimizer" in config and config["optimizer"] is not None:
-        if not isinstance(config["optimizer"], dict):
-            raise ValueError("Config 'optimizer' must be an object.")
-        optimizer_rules = {
-            "output_xyz": (is_str, "Config '{name}' must be a string path."),
-            "mode": (is_str, "Config '{name}' must be a string."),
-        }
-        _validate_fields(config["optimizer"], optimizer_rules, prefix="optimizer.")
-        if "ase" in config["optimizer"] and config["optimizer"]["ase"] is not None:
-            if not isinstance(config["optimizer"]["ase"], dict):
-                raise ValueError("Config 'optimizer.ase' must be an object.")
-            ase_config = config["optimizer"]["ase"]
-            for backend_key in ("d3_backend", "dftd3_backend"):
-                backend_value = ase_config.get(backend_key)
-                if backend_value is None:
                     continue
-                if not isinstance(backend_value, str):
+                if not _is_number(value):
                     raise ValueError(
-                        f"Config 'optimizer.ase.{backend_key}' must be a string."
+                        f"Config '{param_prefix}.{key}' must be a number."
                     )
-                if backend_value != "dftd3":
-                    raise ValueError(
-                        "Config 'optimizer.ase.{name}' must be 'dftd3'.".format(
-                            name=backend_key
-                        )
-                    )
-            d3_params = ase_config.get("d3_params")
-            dftd3_params = ase_config.get("dftd3_params")
-            if d3_params is not None and dftd3_params is not None:
-                raise ValueError(
-                    "Config must not define both 'optimizer.ase.d3_params' and "
-                    "'optimizer.ase.dftd3_params'."
+
+
+def _validate_scf_block(scf_block, prefix):
+    if not isinstance(scf_block, dict):
+        raise ValueError(f"Config '{prefix}' must be an object.")
+    scf_validation_rules = {
+        "max_cycle": (_is_int, "Config '{name}' must be an integer."),
+        "conv_tol": (_is_number, "Config '{name}' must be a number (int or float)."),
+        "level_shift": (_is_number, "Config '{name}' must be a number (int or float)."),
+        "damping": (_is_number, "Config '{name}' must be a number (int or float)."),
+        "diis": (_is_diis, "Config '{name}' must be a boolean or integer."),
+        "diis_preset": (_is_str, "Config '{name}' must be a string."),
+        "retry_preset": (_is_str, "Config '{name}' must be a string."),
+        "chkfile": (_is_str, "Config '{name}' must be a string path."),
+        "reference": (_is_str, "Config '{name}' must be a string."),
+        "extra": (_is_dict, "Config '{name}' must be an object."),
+    }
+    _validate_fields(scf_block, scf_validation_rules, prefix=f"{prefix}.")
+    _validate_scf_extra(scf_block.get("extra"), prefix)
+    reference_value = scf_block.get("reference")
+    if reference_value is not None:
+        allowed_reference = ("auto", "rks", "uks")
+        normalized_reference = str(reference_value).strip().lower()
+        if normalized_reference not in allowed_reference:
+            allowed_values = ", ".join(allowed_reference)
+            raise ValueError(
+                "Config '{prefix}.reference' must be one of: {values}. "
+                "Example: {example}.".format(
+                    prefix=prefix,
+                    values=allowed_values,
+                    example=_schema_example_for_path("scf.reference"),
                 )
-            if d3_params is not None:
-                chosen_params = d3_params
-                param_prefix = "optimizer.ase.d3_params"
-            else:
-                chosen_params = dftd3_params
-                param_prefix = "optimizer.ase.dftd3_params"
-            if chosen_params is not None:
-                if not isinstance(chosen_params, dict):
-                    raise ValueError(
-                        f"Config '{param_prefix}' must be an object/mapping."
-                    )
-                for key, value in chosen_params.items():
-                    if key == "damping" and isinstance(value, dict):
-                        for subkey, subvalue in value.items():
-                            if subkey in ("damping", "variant", "method"):
-                                if not isinstance(subvalue, str):
-                                    raise ValueError(
-                                        f"Config '{param_prefix}.damping.{subkey}' must be a string."
-                                    )
-                                continue
-                            if subkey == "parameters" and isinstance(subvalue, dict):
-                                for param_key, param_value in subvalue.items():
-                                    if not is_number(param_value):
-                                        raise ValueError(
-                                            "Config '{prefix}.damping.parameters.{name}' "
-                                            "must be a number.".format(
-                                                prefix=param_prefix, name=param_key
-                                            )
-                                        )
-                                continue
-                            if not is_number(subvalue):
-                                raise ValueError(
-                                    "Config '{prefix}.damping.{name}' "
-                                    "must be a number.".format(prefix=param_prefix, name=subkey)
-                                )
-                        continue
-                    if key == "parameters" and isinstance(value, dict):
-                        for param_key, param_value in value.items():
-                            if not is_number(param_value):
-                                raise ValueError(
-                                    "Config '{prefix}.parameters.{name}' must be a number.".format(
-                                        prefix=param_prefix, name=param_key
-                                    )
-                                )
-                        continue
-                    if not is_number(value):
-                        raise ValueError(
-                            f"Config '{param_prefix}.{key}' must be a number."
-                        )
-    if "scf" in config and config["scf"] is not None:
-        if not isinstance(config["scf"], dict):
-            raise ValueError("Config 'scf' must be an object.")
-        scf_validation_rules = {
-            "max_cycle": (is_int, "Config '{name}' must be an integer."),
-            "conv_tol": (is_number, "Config '{name}' must be a number (int or float)."),
-            "level_shift": (is_number, "Config '{name}' must be a number (int or float)."),
-            "damping": (is_number, "Config '{name}' must be a number (int or float)."),
-            "diis": (is_diis, "Config '{name}' must be a boolean or integer."),
-            "diis_preset": (is_str, "Config '{name}' must be a string."),
-            "retry_preset": (is_str, "Config '{name}' must be a string."),
-            "chkfile": (is_str, "Config '{name}' must be a string path."),
-            "reference": (is_str, "Config '{name}' must be a string."),
-            "extra": (is_dict, "Config '{name}' must be an object."),
-        }
-        _validate_fields(config["scf"], scf_validation_rules, prefix="scf.")
-        _validate_scf_extra(config["scf"].get("extra"), "scf")
-        reference_value = config["scf"].get("reference")
-        if reference_value is not None:
-            allowed_reference = ("auto", "rks", "uks")
-            normalized_reference = str(reference_value).strip().lower()
-            if normalized_reference not in allowed_reference:
-                allowed_values = ", ".join(allowed_reference)
-                raise ValueError(
-                    "Config 'scf.reference' must be one of: {values}. "
-                    "Example: {example}.".format(
-                        values=allowed_values,
-                        example=_schema_example_for_path("scf.reference"),
-                    )
-                )
-        if config["scf"].get("retry_preset") is not None:
-            normalize_preset(
-                config["scf"].get("retry_preset"),
-                scf_retry_aliases,
-                scf_retry_presets,
-                "scf.retry_preset",
             )
-        if config["scf"].get("diis_preset") is not None:
-            normalize_preset(
-                config["scf"].get("diis_preset"),
-                diis_aliases,
-                diis_presets,
-                "scf.diis_preset",
-            )
-    if "single_point" in config and config["single_point"] is not None:
-        if not isinstance(config["single_point"], dict):
-            raise ValueError("Config 'single_point' must be an object.")
-        single_point_rules = {
-            "basis": (is_str, "Config '{name}' must be a string."),
-            "xc": (is_str, "Config '{name}' must be a string."),
-            "solvent": (is_str, "Config '{name}' must be a string."),
-            "solvent_model": (is_str, "Config '{name}' must be a string."),
-            "solvent_map": (is_str, "Config '{name}' must be a string path."),
-            "dispersion": (is_str, "Config '{name}' must be a string."),
-        }
-        _validate_fields(config["single_point"], single_point_rules, prefix="single_point.")
-        _validate_smd_solvent_support(
-            config["single_point"].get("solvent_model"),
-            config["single_point"].get("solvent"),
-            "single_point.solvent",
+    if scf_block.get("retry_preset") is not None:
+        _normalize_preset(
+            scf_block.get("retry_preset"),
+            SCF_RETRY_ALIASES,
+            SCF_RETRY_PRESETS,
+            f"{prefix}.retry_preset",
         )
-        if "scf" in config["single_point"] and config["single_point"]["scf"] is not None:
-            if not isinstance(config["single_point"]["scf"], dict):
-                raise ValueError("Config 'single_point.scf' must be an object.")
-            scf_validation_rules = {
-                "max_cycle": (is_int, "Config '{name}' must be an integer."),
-                "conv_tol": (is_number, "Config '{name}' must be a number (int or float)."),
-                "level_shift": (is_number, "Config '{name}' must be a number (int or float)."),
-                "damping": (is_number, "Config '{name}' must be a number (int or float)."),
-                "diis": (is_diis, "Config '{name}' must be a boolean or integer."),
-                "diis_preset": (is_str, "Config '{name}' must be a string."),
-                "retry_preset": (is_str, "Config '{name}' must be a string."),
-                "chkfile": (is_str, "Config '{name}' must be a string path."),
-                "reference": (is_str, "Config '{name}' must be a string."),
-                "extra": (is_dict, "Config '{name}' must be an object."),
-            }
-            _validate_fields(config["single_point"]["scf"], scf_validation_rules, prefix="single_point.scf.")
-            _validate_scf_extra(config["single_point"]["scf"].get("extra"), "single_point.scf")
-            reference_value = config["single_point"]["scf"].get("reference")
-            if reference_value is not None:
-                allowed_reference = ("auto", "rks", "uks")
-                normalized_reference = str(reference_value).strip().lower()
-                if normalized_reference not in allowed_reference:
-                    allowed_values = ", ".join(allowed_reference)
-                    raise ValueError(
-                        "Config 'single_point.scf.reference' must be one of: {values}. "
-                        "Example: {example}.".format(
-                            values=allowed_values,
-                            example=_schema_example_for_path("scf.reference"),
-                        )
-                    )
-            if config["single_point"]["scf"].get("retry_preset") is not None:
-                normalize_preset(
-                    config["single_point"]["scf"].get("retry_preset"),
-                    scf_retry_aliases,
-                    scf_retry_presets,
-                    "single_point.scf.retry_preset",
-                )
-            if config["single_point"]["scf"].get("diis_preset") is not None:
-                normalize_preset(
-                    config["single_point"]["scf"].get("diis_preset"),
-                    diis_aliases,
-                    diis_presets,
-                    "single_point.scf.diis_preset",
-                )
+    if scf_block.get("diis_preset") is not None:
+        _normalize_preset(
+            scf_block.get("diis_preset"),
+            DIIS_ALIASES,
+            DIIS_PRESETS,
+            f"{prefix}.diis_preset",
+        )
+
+
+def _validate_single_point_config(config):
+    if "single_point" not in config or config["single_point"] is None:
+        return
+    if not isinstance(config["single_point"], dict):
+        raise ValueError("Config 'single_point' must be an object.")
+    single_point_rules = {
+        "basis": (_is_str, "Config '{name}' must be a string."),
+        "xc": (_is_str, "Config '{name}' must be a string."),
+        "solvent": (_is_str, "Config '{name}' must be a string."),
+        "solvent_model": (_is_str, "Config '{name}' must be a string."),
+        "solvent_map": (_is_str, "Config '{name}' must be a string path."),
+        "dispersion": (_is_str, "Config '{name}' must be a string."),
+    }
+    _validate_fields(config["single_point"], single_point_rules, prefix="single_point.")
+    _validate_smd_solvent_support(
+        config["single_point"].get("solvent_model"),
+        config["single_point"].get("solvent"),
+        "single_point.solvent",
+    )
+    if "scf" in config["single_point"] and config["single_point"]["scf"] is not None:
+        _validate_scf_block(config["single_point"]["scf"], "single_point.scf")
+
+
+def _validate_frequency_blocks(config):
     for frequency_key in ("frequency", "freq"):
         if frequency_key in config and config[frequency_key] is not None:
             if not isinstance(config[frequency_key], dict):
                 raise ValueError(f"Config '{frequency_key}' must be an object.")
             frequency_rules = {
-                "dispersion": (is_str, "Config '{name}' must be a string."),
-                "dispersion_model": (is_str, "Config '{name}' must be a string."),
+                "dispersion": (_is_str, "Config '{name}' must be a string."),
+                "dispersion_model": (_is_str, "Config '{name}' must be a string."),
                 "dispersion_step": (
-                    is_positive_number,
+                    _is_positive_number,
                     "Config '{name}' must be a positive number.",
                 ),
-                "use_chkfile": (is_bool, "Config '{name}' must be a boolean."),
+                "use_chkfile": (_is_bool, "Config '{name}' must be a boolean."),
             }
             _validate_fields(config[frequency_key], frequency_rules, prefix=f"{frequency_key}.")
-    if "ts_quality" in config and config["ts_quality"] is not None:
-        if not isinstance(config["ts_quality"], dict):
-            raise ValueError("Config 'ts_quality' must be an object.")
-        ts_rules = {
-            "expected_imaginary_count": (
-                is_int,
-                "Config '{name}' must be an integer.",
-            ),
-            "imaginary_frequency_min_abs": (
-                is_number,
-                "Config '{name}' must be a number (int or float).",
-            ),
-            "imaginary_frequency_max_abs": (
-                is_number,
-                "Config '{name}' must be a number (int or float).",
-            ),
-            "projection_step": (
-                is_positive_number,
-                "Config '{name}' must be a positive number.",
-            ),
-            "projection_min_abs": (
-                is_number,
-                "Config '{name}' must be a number (int or float).",
-            ),
-            "enforce": (is_bool, "Config '{name}' must be a boolean."),
-        }
-        _validate_fields(config["ts_quality"], ts_rules, prefix="ts_quality.")
-        expected_count = config["ts_quality"].get("expected_imaginary_count")
-        if expected_count is not None and expected_count < 0:
-            raise ValueError("Config 'ts_quality.expected_imaginary_count' must be >= 0.")
-        min_abs = config["ts_quality"].get("imaginary_frequency_min_abs")
-        max_abs = config["ts_quality"].get("imaginary_frequency_max_abs")
-        if min_abs is not None and min_abs < 0:
-            raise ValueError("Config 'ts_quality.imaginary_frequency_min_abs' must be >= 0.")
-        if max_abs is not None and max_abs < 0:
-            raise ValueError("Config 'ts_quality.imaginary_frequency_max_abs' must be >= 0.")
-        if min_abs is not None and max_abs is not None and min_abs > max_abs:
-            raise ValueError(
-                "Config 'ts_quality.imaginary_frequency_min_abs' must be <= "
-                "'ts_quality.imaginary_frequency_max_abs'."
-            )
-        internal_coords = config["ts_quality"].get("internal_coordinates")
-        if internal_coords is not None:
-            if not isinstance(internal_coords, list):
-                raise ValueError("Config 'ts_quality.internal_coordinates' must be a list.")
-            for idx, coord in enumerate(internal_coords):
-                if not isinstance(coord, dict):
-                    raise ValueError(
-                        f"Config 'ts_quality.internal_coordinates[{idx}]' must be an object."
-                    )
-                coord_type = coord.get("type")
-                if coord_type not in ("bond", "angle", "dihedral"):
-                    raise ValueError(
-                        "Config 'ts_quality.internal_coordinates[{idx}].type' "
-                        "must be one of: bond, angle, dihedral.".format(idx=idx)
-                    )
-                required_indices = {
-                    "bond": ("i", "j"),
-                    "angle": ("i", "j", "k"),
-                    "dihedral": ("i", "j", "k", "l"),
-                }
-                for key in required_indices[coord_type]:
-                    value = coord.get(key)
-                    if not is_int(value) or value < 0:
-                        raise ValueError(
-                            "Config 'ts_quality.internal_coordinates[{idx}].{key}' "
-                            "must be an integer >= 0.".format(idx=idx, key=key)
-                        )
-                target = coord.get("target")
-                if target is not None and not is_number(target):
-                    raise ValueError(
-                        "Config 'ts_quality.internal_coordinates[{idx}].target' "
-                        "must be a number.".format(idx=idx)
-                    )
-                if coord.get("direction") is not None:
-                    if coord.get("direction") not in ("increase", "decrease"):
-                        raise ValueError(
-                            "Config 'ts_quality.internal_coordinates[{idx}].direction' "
-                            "must be 'increase' or 'decrease'.".format(idx=idx)
-                        )
-                if coord.get("target") is None and coord.get("direction") is None:
-                    raise ValueError(
-                        "Config 'ts_quality.internal_coordinates[{idx}]' must define "
-                        "'target' or 'direction'.".format(idx=idx)
-                    )
-                tolerance = coord.get("tolerance")
-                if tolerance is not None and tolerance < 0:
-                    raise ValueError(
-                        "Config 'ts_quality.internal_coordinates[{idx}].tolerance' "
-                        "must be >= 0.".format(idx=idx)
-                    )
-    if "irc" in config and config["irc"] is not None:
-        if not isinstance(config["irc"], dict):
-            raise ValueError("Config 'irc' must be an object.")
-        irc_rules = {
-            "steps": (is_positive_int, "Config '{name}' must be a positive integer."),
-            "step_size": (is_positive_number, "Config '{name}' must be a positive number."),
-            "force_threshold": (is_positive_number, "Config '{name}' must be a positive number."),
-        }
-        _validate_fields(config["irc"], irc_rules, prefix="irc.")
-    if "thermo" in config and config["thermo"] is not None:
-        if not isinstance(config["thermo"], dict):
-            raise ValueError("Config 'thermo' must be an object.")
-        thermo_rules = {
-            "T": (is_number, "Config '{name}' must be a number (int or float)."),
-            "P": (is_number, "Config '{name}' must be a number (int or float)."),
-            "unit": (is_str, "Config '{name}' must be a string."),
-        }
-        _validate_fields(config["thermo"], thermo_rules, prefix="thermo.")
-        temperature = config["thermo"].get("T")
-        pressure = config["thermo"].get("P")
-        if temperature is None or pressure is None or config["thermo"].get("unit") is None:
-            raise ValueError(
-                "Config 'thermo' must define 'T', 'P', and 'unit'. "
-                "Example: \"thermo\": {\"T\": 298.15, \"P\": 1.0, \"unit\": \"atm\"}."
-            )
-        if temperature <= 0:
-            raise ValueError("Config 'thermo.T' must be a positive number.")
-        if pressure <= 0:
-            raise ValueError("Config 'thermo.P' must be a positive number.")
-        unit = config["thermo"].get("unit")
-        if unit not in ("atm", "bar", "Pa"):
-            raise ValueError(
-                "Config 'thermo.unit' must be one of: atm, bar, Pa. "
-                "Example: \"thermo\": {\"T\": 298.15, \"P\": 1.0, \"unit\": \"atm\"}."
-            )
-    if "io" in config and config["io"] is not None:
-        if not isinstance(config["io"], dict):
-            raise ValueError("Config 'io' must be an object.")
-        io_rules = {
-            "write_interval_steps": (
-                is_positive_int,
-                "Config '{name}' must be a positive integer.",
-            ),
-            "write_interval_seconds": (
-                is_positive_number,
-                "Config '{name}' must be a positive number.",
-            ),
-            "scan_write_interval_points": (
-                is_positive_int,
-                "Config '{name}' must be a positive integer.",
-            ),
-            "snapshot_interval_steps": (
-                is_positive_int,
-                "Config '{name}' must be a positive integer.",
-            ),
-            "snapshot_mode": (
-                is_snapshot_mode,
-                "Config '{name}' must be one of: none, last, all.",
-            ),
-        }
-        _validate_fields(config["io"], io_rules, prefix="io.")
-    if "constraints" in config and config["constraints"] is not None:
-        if not isinstance(config["constraints"], dict):
-            raise ValueError("Config 'constraints' must be an object.")
-        constraints = config["constraints"]
 
-        def _validate_constraint_list(list_name, items, index_keys, value_key, value_label):
-            if not isinstance(items, list):
+
+def _validate_ts_quality_config(config):
+    if "ts_quality" not in config or config["ts_quality"] is None:
+        return
+    if not isinstance(config["ts_quality"], dict):
+        raise ValueError("Config 'ts_quality' must be an object.")
+    ts_rules = {
+        "expected_imaginary_count": (
+            _is_int,
+            "Config '{name}' must be an integer.",
+        ),
+        "imaginary_frequency_min_abs": (
+            _is_number,
+            "Config '{name}' must be a number (int or float).",
+        ),
+        "imaginary_frequency_max_abs": (
+            _is_number,
+            "Config '{name}' must be a number (int or float).",
+        ),
+        "projection_step": (
+            _is_positive_number,
+            "Config '{name}' must be a positive number.",
+        ),
+        "projection_min_abs": (
+            _is_number,
+            "Config '{name}' must be a number (int or float).",
+        ),
+        "enforce": (_is_bool, "Config '{name}' must be a boolean."),
+    }
+    _validate_fields(config["ts_quality"], ts_rules, prefix="ts_quality.")
+    expected_count = config["ts_quality"].get("expected_imaginary_count")
+    if expected_count is not None and expected_count < 0:
+        raise ValueError("Config 'ts_quality.expected_imaginary_count' must be >= 0.")
+    min_abs = config["ts_quality"].get("imaginary_frequency_min_abs")
+    max_abs = config["ts_quality"].get("imaginary_frequency_max_abs")
+    if min_abs is not None and min_abs < 0:
+        raise ValueError("Config 'ts_quality.imaginary_frequency_min_abs' must be >= 0.")
+    if max_abs is not None and max_abs < 0:
+        raise ValueError("Config 'ts_quality.imaginary_frequency_max_abs' must be >= 0.")
+    if min_abs is not None and max_abs is not None and min_abs > max_abs:
+        raise ValueError(
+            "Config 'ts_quality.imaginary_frequency_min_abs' must be <= "
+            "'ts_quality.imaginary_frequency_max_abs'."
+        )
+    internal_coords = config["ts_quality"].get("internal_coordinates")
+    if internal_coords is not None:
+        if not isinstance(internal_coords, list):
+            raise ValueError("Config 'ts_quality.internal_coordinates' must be a list.")
+        for idx, coord in enumerate(internal_coords):
+            if not isinstance(coord, dict):
                 raise ValueError(
-                    "Config 'constraints.{name}' must be a list.".format(name=list_name)
+                    f"Config 'ts_quality.internal_coordinates[{idx}]' must be an object."
                 )
-            for idx, item in enumerate(items):
-                if not isinstance(item, dict):
+            coord_type = coord.get("type")
+            if coord_type not in ("bond", "angle", "dihedral"):
+                raise ValueError(
+                    "Config 'ts_quality.internal_coordinates[{idx}].type' "
+                    "must be one of: bond, angle, dihedral.".format(idx=idx)
+                )
+            required_indices = {
+                "bond": ("i", "j"),
+                "angle": ("i", "j", "k"),
+                "dihedral": ("i", "j", "k", "l"),
+            }
+            for key in required_indices[coord_type]:
+                value = coord.get(key)
+                if not _is_int(value) or value < 0:
                     raise ValueError(
-                        "Config 'constraints.{name}[{idx}]' must be an object.".format(
-                            name=list_name, idx=idx
-                        )
+                        "Config 'ts_quality.internal_coordinates[{idx}].{key}' "
+                        "must be an integer >= 0.".format(idx=idx, key=key)
                     )
-                for key in index_keys:
-                    if key not in item:
-                        raise ValueError(
-                            "Config 'constraints.{name}[{idx}]' must define '{key}'.".format(
-                                name=list_name, idx=idx, key=key
-                            )
-                        )
-                    if not is_int(item[key]):
-                        raise ValueError(
-                            "Config 'constraints.{name}[{idx}].{key}' must be an integer.".format(
-                                name=list_name, idx=idx, key=key
-                            )
-                        )
-                    if item[key] < 0:
-                        raise ValueError(
-                            "Config 'constraints.{name}[{idx}].{key}' must be >= 0.".format(
-                                name=list_name, idx=idx, key=key
-                            )
-                        )
-                if value_key not in item:
+            target = coord.get("target")
+            if target is not None and not _is_number(target):
+                raise ValueError(
+                    "Config 'ts_quality.internal_coordinates[{idx}].target' "
+                    "must be a number.".format(idx=idx)
+                )
+            if coord.get("direction") is not None:
+                if coord.get("direction") not in ("increase", "decrease"):
                     raise ValueError(
-                        "Config 'constraints.{name}[{idx}]' must define '{key}'.".format(
-                            name=list_name, idx=idx, key=value_key
-                        )
+                        "Config 'ts_quality.internal_coordinates[{idx}].direction' "
+                        "must be 'increase' or 'decrease'.".format(idx=idx)
                     )
-                value = item[value_key]
-                if not is_number(value):
-                    raise ValueError(
-                        "Config 'constraints.{name}[{idx}].{key}' must be a number.".format(
-                            name=list_name, idx=idx, key=value_key
-                        )
-                    )
-                if value_label == "length" and value <= 0:
-                    raise ValueError(
-                        "Config 'constraints.{name}[{idx}].{key}' must be > 0 (Angstrom).".format(
-                            name=list_name, idx=idx, key=value_key
-                        )
-                    )
-                if value_label == "angle" and not (0 < value <= 180):
-                    raise ValueError(
-                        "Config 'constraints.{name}[{idx}].{key}' must be between 0 and 180 degrees.".format(
-                            name=list_name, idx=idx, key=value_key
-                        )
-                    )
-                if value_label == "dihedral" and not (-180 <= value <= 180):
-                    raise ValueError(
-                        "Config 'constraints.{name}[{idx}].{key}' must be between -180 and 180 degrees.".format(
-                            name=list_name, idx=idx, key=value_key
-                        )
-                    )
+            if coord.get("target") is None and coord.get("direction") is None:
+                raise ValueError(
+                    "Config 'ts_quality.internal_coordinates[{idx}]' must define "
+                    "'target' or 'direction'.".format(idx=idx)
+                )
+            tolerance = coord.get("tolerance")
+            if tolerance is not None and tolerance < 0:
+                raise ValueError(
+                    "Config 'ts_quality.internal_coordinates[{idx}].tolerance' "
+                    "must be >= 0.".format(idx=idx)
+                )
 
-        bonds = constraints.get("bonds")
-        if bonds is not None:
-            _validate_constraint_list("bonds", bonds, ("i", "j"), "length", "length")
-        angles = constraints.get("angles")
-        if angles is not None:
-            _validate_constraint_list("angles", angles, ("i", "j", "k"), "angle", "angle")
-        dihedrals = constraints.get("dihedrals")
-        if dihedrals is not None:
-            _validate_constraint_list(
-                "dihedrals", dihedrals, ("i", "j", "k", "l"), "dihedral", "dihedral"
-            )
+
+def _validate_irc_config(config):
+    if "irc" not in config or config["irc"] is None:
+        return
+    if not isinstance(config["irc"], dict):
+        raise ValueError("Config 'irc' must be an object.")
+    irc_rules = {
+        "steps": (_is_positive_int, "Config '{name}' must be a positive integer."),
+        "step_size": (_is_positive_number, "Config '{name}' must be a positive number."),
+        "force_threshold": (_is_positive_number, "Config '{name}' must be a positive number."),
+    }
+    _validate_fields(config["irc"], irc_rules, prefix="irc.")
+
+
+def _validate_thermo_config(config):
+    if "thermo" not in config or config["thermo"] is None:
+        return
+    if not isinstance(config["thermo"], dict):
+        raise ValueError("Config 'thermo' must be an object.")
+    thermo_rules = {
+        "T": (_is_number, "Config '{name}' must be a number (int or float)."),
+        "P": (_is_number, "Config '{name}' must be a number (int or float)."),
+        "unit": (_is_str, "Config '{name}' must be a string."),
+    }
+    _validate_fields(config["thermo"], thermo_rules, prefix="thermo.")
+    temperature = config["thermo"].get("T")
+    pressure = config["thermo"].get("P")
+    if temperature is None or pressure is None or config["thermo"].get("unit") is None:
+        raise ValueError(
+            "Config 'thermo' must define 'T', 'P', and 'unit'. "
+            "Example: \"thermo\": {\"T\": 298.15, \"P\": 1.0, \"unit\": \"atm\"}."
+        )
+    if temperature <= 0:
+        raise ValueError("Config 'thermo.T' must be a positive number.")
+    if pressure <= 0:
+        raise ValueError("Config 'thermo.P' must be a positive number.")
+    unit = config["thermo"].get("unit")
+    if unit not in ("atm", "bar", "Pa"):
+        raise ValueError(
+            "Config 'thermo.unit' must be one of: atm, bar, Pa. "
+            "Example: \"thermo\": {\"T\": 298.15, \"P\": 1.0, \"unit\": \"atm\"}."
+        )
+
+
+def _validate_io_config(config):
+    if "io" not in config or config["io"] is None:
+        return
+    if not isinstance(config["io"], dict):
+        raise ValueError("Config 'io' must be an object.")
+    io_rules = {
+        "write_interval_steps": (
+            _is_positive_int,
+            "Config '{name}' must be a positive integer.",
+        ),
+        "write_interval_seconds": (
+            _is_positive_number,
+            "Config '{name}' must be a positive number.",
+        ),
+        "scan_write_interval_points": (
+            _is_positive_int,
+            "Config '{name}' must be a positive integer.",
+        ),
+        "snapshot_interval_steps": (
+            _is_positive_int,
+            "Config '{name}' must be a positive integer.",
+        ),
+        "snapshot_mode": (
+            _is_snapshot_mode,
+            "Config '{name}' must be one of: none, last, all.",
+        ),
+    }
+    _validate_fields(config["io"], io_rules, prefix="io.")
+
+
+def _validate_scan_blocks(config):
     scan = config.get("scan")
     scan2d = config.get("scan2d")
     if scan is not None and scan2d is not None:
@@ -1293,12 +1166,118 @@ def validate_run_config(config):
         _validate_scan_config(scan, "scan")
     if scan2d is not None:
         _validate_scan_config(scan2d, "scan2d", require_dimensions=True)
-    normalized_mode = normalize_calc_mode(config.get("calculation_mode"))
+    normalized_mode = _normalize_calc_mode(config.get("calculation_mode"))
     if normalized_mode == "scan":
         if scan is None and scan2d is None:
             raise ValueError("Config 'calculation_mode' is 'scan' but no scan block exists.")
     elif scan is not None or scan2d is not None:
         raise ValueError("Config 'scan' requires 'calculation_mode' to be 'scan'.")
+
+
+def _validate_required_core_fields(config):
+    for required_key in ("basis", "xc", "solvent"):
+        if config.get(required_key) in (None, ""):
+            raise ValueError(
+                "Config '{name}' is required. Example: {example}.".format(
+                    name=required_key,
+                    example=_schema_example_for_path(required_key),
+                )
+            )
+
+
+def _validate_calculation_mode(config):
+    calculation_mode = config.get("calculation_mode")
+    if calculation_mode is None:
+        return
+    allowed_modes = ("optimization", "single_point", "frequency", "irc", "scan")
+    if calculation_mode not in allowed_modes:
+        allowed_values = ", ".join(allowed_modes)
+        raise ValueError(
+            "Config 'calculation_mode' must be one of: {values}. "
+            "Example: {example}.".format(
+                values=allowed_values,
+                example=_schema_example_for_path("calculation_mode"),
+            )
+        )
+
+
+def _validate_spin_mode(config):
+    spin_mode = config.get("spin_mode")
+    if spin_mode is None:
+        return
+    allowed_spin_modes = ("auto", "strict")
+    if spin_mode not in allowed_spin_modes:
+        allowed_values = ", ".join(allowed_spin_modes)
+        raise ValueError(
+            "Config 'spin_mode' must be one of: {values}. "
+            "Example: {example}.".format(
+                values=allowed_values,
+                example=_schema_example_for_path("spin_mode"),
+            )
+        )
+
+
+def _validate_dispersion(config):
+    dispersion = config.get("dispersion")
+    if dispersion is not None and dispersion not in ("d3bj", "d3zero", "d4"):
+        raise ValueError(
+            "Config 'dispersion' must be one of: d3bj, d3zero, d4. "
+            "Example: {example}.".format(example=_schema_example_for_path("dispersion"))
+        )
+
+
+def _validate_solvent_model(config):
+    solvent_model = config.get("solvent_model")
+    if not solvent_model:
+        return
+    if not isinstance(solvent_model, str):
+        raise ValueError("Config 'solvent_model' must be a string.")
+    if solvent_model not in ("pcm", "smd"):
+        raise ValueError(
+            "Config 'solvent_model' must be one of: pcm, smd. "
+            "Example: \"solvent_model\": \"pcm\"."
+        )
+    if not config.get("solvent"):
+        raise ValueError(
+            "Config 'solvent' is required when 'solvent_model' is set. "
+            "Example: \"solvent\": \"water\"."
+        )
+    _validate_smd_solvent_support(solvent_model, config.get("solvent"), "solvent")
+
+
+def _validate_top_level_fields(config):
+    _validate_fields(config, TOP_LEVEL_VALIDATION_RULES)
+
+
+def _validate_config_sections(config):
+    _validate_optimizer_config(config)
+    if "scf" in config and config["scf"] is not None:
+        _validate_scf_block(config["scf"], "scf")
+    _validate_single_point_config(config)
+    _validate_frequency_blocks(config)
+    _validate_ts_quality_config(config)
+    _validate_irc_config(config)
+    _validate_thermo_config(config)
+    _validate_io_config(config)
+
+
+def _validate_constraints(config):
+    if "constraints" in config and config["constraints"] is not None:
+        normalize_constraints(config["constraints"], style="config")
+
+
+def validate_run_config(config):
+    if not isinstance(config, dict):
+        raise ValueError("Config must be an object/mapping.")
+    _validate_top_level_fields(config)
+    _validate_required_core_fields(config)
+    _validate_calculation_mode(config)
+    _validate_spin_mode(config)
+    _validate_dispersion(config)
+    _validate_solvent_model(config)
+    _validate_config_sections(config)
+    _validate_constraints(config)
+    _validate_scan_blocks(config)
 
 
 def build_run_config(config):

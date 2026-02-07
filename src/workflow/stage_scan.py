@@ -520,6 +520,594 @@ def run_scan_point_from_manifest(manifest_path, index):
     )
 
 
+def _resolve_scan_executor_state(
+    scan_config,
+    run_dir,
+    scan_dir,
+    total_points,
+    thread_count,
+    openmp_available,
+    effective_threads,
+):
+    scan_executor = _normalize_scan_executor(scan_config.get("executor"))
+    scan_max_workers = None
+    scan_batch_size = None
+    manifest_setting = scan_config.get("manifest_file")
+    if manifest_setting:
+        scan_manifest_path = resolve_run_path(run_dir, manifest_setting)
+    else:
+        scan_manifest_path = resolve_run_path(scan_dir, "scan_manifest.json")
+    scan_thread_count = thread_count
+    if scan_executor == "local":
+        scan_max_workers, scan_thread_count = _resolve_scan_worker_settings(
+            scan_config,
+            total_points,
+            thread_count,
+        )
+        scan_batch_size = _resolve_scan_batch_size(
+            scan_config,
+            total_points,
+            scan_max_workers,
+        )
+    elif scan_executor == "manifest":
+        scan_thread_count = _resolve_scan_threads_per_worker(scan_config, thread_count)
+
+    if scan_executor in ("local", "manifest"):
+        if thread_count and thread_count != scan_thread_count:
+            logging.warning(
+                "Scan executor %s overrides thread_count=%s to threads_per_worker=%s.",
+                scan_executor,
+                thread_count,
+                scan_thread_count,
+            )
+        thread_status = apply_thread_settings(scan_thread_count)
+        effective_threads = thread_status.get("effective_threads")
+        openmp_available = thread_status.get("openmp_available")
+
+    return {
+        "executor": scan_executor,
+        "max_workers": scan_max_workers,
+        "batch_size": scan_batch_size,
+        "manifest_path": scan_manifest_path,
+        "thread_count": scan_thread_count,
+        "openmp_available": openmp_available,
+        "effective_threads": effective_threads,
+    }
+
+
+def _resolve_scan_calculation_state(context: RunContext, scan_mode):
+    calc_basis = context["basis"]
+    calc_xc = context["xc"]
+    calc_scf_config = context["scf_config"]
+    calc_solvent_name = context["solvent_name"]
+    calc_solvent_model = context["solvent_model"]
+    calc_eps = context["eps"]
+    calc_dispersion_model = context["dispersion_model"]
+    optimizer_mode = context["optimizer_mode"]
+    optimizer_ase_dict = context["optimizer_ase_dict"]
+    constraints = context["constraints"]
+    scan_seed_chkfile = (
+        calc_scf_config.get("chkfile") if isinstance(calc_scf_config, dict) else None
+    )
+
+    if scan_mode == "single_point":
+        calc_basis = context["sp_basis"]
+        calc_xc = context["sp_xc"]
+        calc_scf_config = context["sp_scf_config"]
+        calc_solvent_name = context["sp_solvent_name"]
+        calc_solvent_model = context["sp_solvent_model"]
+        calc_eps = context["sp_eps"]
+        calc_dispersion_model = context["sp_dispersion_model"]
+
+    return {
+        "basis": calc_basis,
+        "xc": calc_xc,
+        "scf_config": calc_scf_config,
+        "solvent_name": calc_solvent_name,
+        "solvent_model": calc_solvent_model,
+        "solvent_eps": calc_eps,
+        "dispersion_model": calc_dispersion_model,
+        "optimizer_mode": optimizer_mode,
+        "optimizer_ase_dict": optimizer_ase_dict,
+        "constraints": constraints,
+        "seed_chkfile": scan_seed_chkfile,
+    }
+
+
+def _build_scan_summary(
+    *,
+    args,
+    context,
+    run_dir,
+    log_path,
+    run_metadata_path,
+    scan_result_path,
+    scan_result_csv_path,
+    event_log_path,
+    run_id,
+    charge,
+    spin,
+    multiplicity,
+    memory_mb,
+    memory_limit_status,
+    dimensions,
+    values_grid,
+    scan_mode,
+    points_dir,
+    scan_write_interval_points,
+    executor_state,
+    calc_state,
+):
+    scan_summary = {
+        "status": "running",
+        "run_directory": run_dir,
+        "run_started_at": datetime.now().isoformat(),
+        "run_id": run_id,
+        "attempt": context["attempt"],
+        "run_id_history": context["run_id_history"],
+        "pid": os.getpid(),
+        "xyz_file": args.xyz_file,
+        "xyz_file_hash": compute_file_hash(args.xyz_file),
+        "basis": calc_state["basis"],
+        "xc": calc_state["xc"],
+        "solvent": calc_state["solvent_name"],
+        "solvent_model": calc_state["solvent_model"] if calc_state["solvent_name"] else None,
+        "solvent_eps": calc_state["solvent_eps"],
+        "dispersion": calc_state["dispersion_model"],
+        "scan": {
+            "mode": scan_mode,
+            "dimensions": dimensions,
+            "grid_counts": [len(values) for values in values_grid],
+            "total_points": math.prod([len(values) for values in values_grid]),
+        },
+        "scan_result_file": scan_result_path,
+        "scan_result_csv_file": scan_result_csv_path,
+        "calculation_mode": "scan",
+        "charge": charge,
+        "spin": spin,
+        "multiplicity": multiplicity,
+        "thread_count": executor_state["thread_count"],
+        "effective_thread_count": executor_state["effective_threads"],
+        "openmp_available": executor_state["openmp_available"],
+        "memory_mb": memory_mb,
+        "memory_limit_status": memory_limit_status,
+        "log_file": log_path,
+        "event_log_file": event_log_path,
+        "run_metadata_file": run_metadata_path,
+        "config_file": args.config,
+        "config": context["config_dict"],
+        "config_raw": context["config_raw"],
+        "config_hash": compute_text_hash(context["config_raw"]),
+        "scf_config": calc_state["scf_config"],
+        "scf_settings": calc_state["scf_config"],
+        "environment": collect_environment_snapshot(executor_state["thread_count"]),
+        "git": collect_git_metadata(os.getcwd()),
+        "versions": {
+            "ase": get_package_version("ase"),
+            "pyscf": get_package_version("pyscf"),
+            "dftd3": get_package_version("dftd3"),
+            "dftd4": get_package_version("dftd4"),
+        },
+    }
+    scan_summary["scan"].update(
+        {
+            "executor": executor_state["executor"],
+            "max_workers": executor_state["max_workers"]
+            if executor_state["executor"] == "local"
+            else None,
+            "manifest_file": executor_state["manifest_path"]
+            if executor_state["executor"] == "manifest"
+            else None,
+            "point_result_dir": points_dir,
+            "threads_per_worker": executor_state["thread_count"],
+            "batch_size": executor_state["batch_size"]
+            if executor_state["executor"] == "local"
+            else None,
+            "write_interval_points": scan_write_interval_points,
+        }
+    )
+    scan_summary["run_updated_at"] = datetime.now().isoformat()
+    return scan_summary
+
+
+def _record_scan_start(scan_summary, run_metadata_path, event_log_path, run_id, run_dir, context):
+    write_run_metadata(run_metadata_path, scan_summary)
+    record_status_event(
+        event_log_path,
+        run_id,
+        run_dir,
+        "running",
+        previous_status=context.get("previous_status"),
+    )
+
+
+def _run_scan_capability_check_if_needed(
+    *,
+    scan_executor,
+    molecule_context,
+    calc_state,
+    verbose,
+    memory_mb,
+    multiplicity,
+):
+    if scan_executor == "manifest":
+        logging.info("Manifest executor selected; skipping capability check.")
+        return
+    mol = molecule_context["mol"]
+    run_capability_check(
+        mol,
+        calc_state["basis"],
+        calc_state["xc"],
+        calc_state["scf_config"],
+        calc_state["solvent_model"] if calc_state["solvent_name"] else None,
+        calc_state["solvent_name"],
+        calc_state["solvent_eps"],
+        calc_state["dispersion_model"],
+        "none",
+        dispersion_params=_resolve_d3_params(calc_state["optimizer_ase_dict"]),
+        require_hessian=False,
+        verbose=verbose,
+        memory_mb=memory_mb,
+        optimizer_mode=calc_state["optimizer_mode"],
+        multiplicity=multiplicity,
+    )
+
+
+def _log_scan_execution_plan(
+    *,
+    scan_mode,
+    point_count,
+    executor_state,
+    memory_mb,
+    log_path,
+    scan_result_path,
+    scan_result_csv_path,
+):
+    logging.info("Starting scan (%s mode) with %d points.", scan_mode, point_count)
+    logging.info("Scan executor: %s", executor_state["executor"])
+    if executor_state["executor"] == "local":
+        logging.info("Scan workers: %s", executor_state["max_workers"])
+        if executor_state["batch_size"]:
+            logging.info("Scan batch size: %s", executor_state["batch_size"])
+    if executor_state["thread_count"]:
+        logging.info("Threads per worker: %s", executor_state["thread_count"])
+    if memory_mb:
+        logging.info("Memory target: %s MB (PySCF max_memory)", memory_mb)
+    if log_path:
+        logging.info("Log file: %s", log_path)
+    if scan_result_path:
+        logging.info("Scan results file: %s", scan_result_path)
+    if scan_result_csv_path:
+        logging.info("Scan results CSV file: %s", scan_result_csv_path)
+
+
+def _build_scan_result_writer(
+    *,
+    results_by_index,
+    scan_result_path,
+    scan_result_csv_path,
+    scan_write_interval_points,
+    scan_summary,
+    run_metadata_path,
+):
+    last_scan_write = {"count": 0}
+
+    def _maybe_write_scan_results(force=False):
+        if not results_by_index:
+            return
+        completed = len(results_by_index)
+        if (
+            force
+            or scan_write_interval_points <= 1
+            or completed - last_scan_write["count"] >= scan_write_interval_points
+        ):
+            _write_scan_results(results_by_index, scan_result_path, scan_result_csv_path)
+            scan_summary["scan"]["completed_points"] = completed
+            scan_summary["run_updated_at"] = datetime.now().isoformat()
+            write_run_metadata(run_metadata_path, scan_summary)
+            last_scan_write["count"] = completed
+
+    return _maybe_write_scan_results
+
+
+def _build_manifest_settings(
+    *,
+    calc_state,
+    charge,
+    spin,
+    multiplicity,
+    memory_mb,
+    verbose,
+    scan_thread_count,
+    scan_write_interval_points,
+    profiling_enabled,
+):
+    return {
+        "basis": calc_state["basis"],
+        "xc": calc_state["xc"],
+        "scf_config": calc_state["scf_config"],
+        "seed_chkfile": calc_state["seed_chkfile"],
+        "solvent": calc_state["solvent_name"],
+        "solvent_model": calc_state["solvent_model"] if calc_state["solvent_name"] else None,
+        "solvent_eps": calc_state["solvent_eps"],
+        "dispersion": calc_state["dispersion_model"],
+        "optimizer_mode": calc_state["optimizer_mode"],
+        "optimizer_ase": calc_state["optimizer_ase_dict"],
+        "constraints": calc_state["constraints"],
+        "charge": charge,
+        "spin": spin,
+        "multiplicity": multiplicity,
+        "memory_mb": memory_mb,
+        "verbose": verbose,
+        "thread_count": scan_thread_count,
+        "threads_per_worker": scan_thread_count,
+        "write_interval_points": scan_write_interval_points,
+        "profiling_enabled": profiling_enabled,
+    }
+
+
+def _finalize_scan_manifest_only(
+    *,
+    run_start,
+    scan_points,
+    memory_limit_enforced,
+    run_metadata_path,
+    event_log_path,
+    run_id,
+    run_dir,
+    scan_summary,
+    queue_update_fn,
+):
+    scan_summary["scan"]["completed_points"] = 0
+    scan_summary["summary"] = {
+        "elapsed_seconds": time.perf_counter() - run_start,
+        "n_points": 0,
+        "planned_points": len(scan_points),
+        "converged_points": 0,
+        "final_energy": None,
+        "manifest_only": True,
+    }
+    scan_summary["summary"]["memory_limit_enforced"] = memory_limit_enforced
+    finalize_metadata(
+        run_metadata_path,
+        event_log_path,
+        run_id,
+        run_dir,
+        scan_summary,
+        status="completed",
+        previous_status="running",
+        queue_update_fn=queue_update_fn,
+        exit_code=0,
+    )
+
+
+def _execute_manifest_scan(
+    *,
+    args,
+    executor_state,
+    scan_dir,
+    run_dir,
+    scan_mode,
+    dimensions,
+    scan_points,
+    calc_state,
+    charge,
+    spin,
+    multiplicity,
+    memory_mb,
+    verbose,
+    scan_write_interval_points,
+    profiling_enabled,
+):
+    manifest_settings = _build_manifest_settings(
+        calc_state=calc_state,
+        charge=charge,
+        spin=spin,
+        multiplicity=multiplicity,
+        memory_mb=memory_mb,
+        verbose=verbose,
+        scan_thread_count=executor_state["thread_count"],
+        scan_write_interval_points=scan_write_interval_points,
+        profiling_enabled=profiling_enabled,
+    )
+    _write_scan_manifest(
+        manifest_path=executor_state["manifest_path"],
+        scan_dir=scan_dir,
+        run_dir=run_dir,
+        xyz_file=args.xyz_file,
+        scan_mode=scan_mode,
+        dimensions=dimensions,
+        scan_points=scan_points,
+        settings=manifest_settings,
+    )
+    logging.info("Wrote scan manifest to %s", executor_state["manifest_path"])
+
+
+def _execute_local_scan(
+    *,
+    args,
+    dimensions,
+    scan_mode,
+    scan_points,
+    scan_dir,
+    run_dir,
+    charge,
+    spin,
+    multiplicity,
+    calc_state,
+    verbose,
+    memory_mb,
+    executor_state,
+    profiling_enabled,
+    results_by_index,
+    maybe_write_scan_results,
+):
+    error = None
+    batch_size = executor_state["batch_size"] or 1
+    batches = _build_scan_batches(scan_points, batch_size)
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=executor_state["max_workers"]
+    ) as executor:
+        futures = {}
+        for batch in batches:
+            futures[
+                executor.submit(
+                    _run_scan_batch,
+                    batch_items=batch,
+                    dimensions=dimensions,
+                    scan_mode=scan_mode,
+                    xyz_file=args.xyz_file,
+                    seed_chkfile=calc_state["seed_chkfile"],
+                    scan_dir=scan_dir,
+                    run_dir=run_dir,
+                    charge=charge,
+                    spin=spin,
+                    multiplicity=multiplicity,
+                    basis=calc_state["basis"],
+                    xc=calc_state["xc"],
+                    scf_config=calc_state["scf_config"],
+                    solvent_name=calc_state["solvent_name"],
+                    solvent_model=calc_state["solvent_model"],
+                    solvent_eps=calc_state["solvent_eps"],
+                    dispersion_model=calc_state["dispersion_model"],
+                    optimizer_mode=calc_state["optimizer_mode"],
+                    optimizer_ase_dict=calc_state["optimizer_ase_dict"],
+                    constraints=calc_state["constraints"],
+                    verbose=verbose,
+                    memory_mb=memory_mb,
+                    thread_count=executor_state["thread_count"],
+                    parallel=True,
+                    profiling_enabled=profiling_enabled,
+                )
+            ] = batch
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                batch_result = future.result()
+            except Exception as exc:
+                logging.exception("Scan batch failed.")
+                error = exc
+                continue
+            for point_result in batch_result.get("results", []):
+                results_by_index[point_result["index"]] = point_result
+            for failure in batch_result.get("errors", []):
+                logging.error(
+                    "Scan point %s failed: %s",
+                    failure.get("index"),
+                    failure.get("error"),
+                )
+                if failure.get("traceback"):
+                    logging.error("%s", failure.get("traceback"))
+                if error is None:
+                    error = RuntimeError(
+                        "Scan point {index} failed: {error}".format(
+                            index=failure.get("index"),
+                            error=failure.get("error"),
+                        )
+                    )
+            if batch_result.get("results") or batch_result.get("errors"):
+                maybe_write_scan_results(force=bool(batch_result.get("errors")))
+    if error:
+        maybe_write_scan_results(force=True)
+        raise error
+
+
+def _execute_serial_scan(
+    *,
+    args,
+    scan_executor,
+    dimensions,
+    scan_mode,
+    scan_points,
+    scan_dir,
+    run_dir,
+    charge,
+    spin,
+    multiplicity,
+    calc_state,
+    verbose,
+    memory_mb,
+    executor_state,
+    profiling_enabled,
+    results_by_index,
+    maybe_write_scan_results,
+):
+    atoms_template = None
+    if scan_executor == "serial":
+        from ase.io import read as ase_read
+
+        atoms_template = ase_read(args.xyz_file)
+    for index, values in enumerate(scan_points):
+        point_result = _run_scan_point(
+            index=index,
+            values=values,
+            dimensions=dimensions,
+            scan_mode=scan_mode,
+            xyz_file=args.xyz_file,
+            atoms_template=atoms_template,
+            seed_chkfile=calc_state["seed_chkfile"],
+            scan_dir=scan_dir,
+            run_dir=run_dir,
+            charge=charge,
+            spin=spin,
+            multiplicity=multiplicity,
+            basis=calc_state["basis"],
+            xc=calc_state["xc"],
+            scf_config=calc_state["scf_config"],
+            solvent_name=calc_state["solvent_name"],
+            solvent_model=calc_state["solvent_model"],
+            solvent_eps=calc_state["solvent_eps"],
+            dispersion_model=calc_state["dispersion_model"],
+            optimizer_mode=calc_state["optimizer_mode"],
+            optimizer_ase_dict=calc_state["optimizer_ase_dict"],
+            constraints=calc_state["constraints"],
+            verbose=verbose,
+            memory_mb=memory_mb,
+            thread_count=executor_state["thread_count"],
+            parallel=False,
+            profiling_enabled=profiling_enabled,
+        )
+        results_by_index[index] = point_result
+        maybe_write_scan_results()
+
+
+def _finalize_scan_with_results(
+    *,
+    results_by_index,
+    scan_result_path,
+    scan_result_csv_path,
+    run_start,
+    scan_summary,
+    memory_limit_enforced,
+    run_metadata_path,
+    event_log_path,
+    run_id,
+    run_dir,
+    queue_update_fn,
+):
+    results = _write_scan_results(results_by_index, scan_result_path, scan_result_csv_path)
+    elapsed_seconds = time.perf_counter() - run_start
+    converged_points = sum(1 for item in results if item.get("converged") is True)
+    scan_summary["summary"] = {
+        "elapsed_seconds": elapsed_seconds,
+        "n_points": len(results),
+        "converged_points": converged_points,
+        "final_energy": results[-1]["energy"] if results else None,
+        "converged": converged_points == len(results) if results else False,
+    }
+    scan_summary["summary"]["memory_limit_enforced"] = memory_limit_enforced
+    finalize_metadata(
+        run_metadata_path,
+        event_log_path,
+        run_id,
+        run_dir,
+        scan_summary,
+        status="completed",
+        previous_status="running",
+        queue_update_fn=queue_update_fn,
+        exit_code=0,
+    )
+
+
 def run_scan_stage(
     args,
     context: RunContext,
@@ -556,382 +1144,152 @@ def run_scan_stage(
     points_dir = os.path.join(scan_dir, "points")
     os.makedirs(points_dir, exist_ok=True)
 
-    scan_executor = _normalize_scan_executor(scan_config.get("executor"))
-    scan_max_workers = None
-    scan_batch_size = None
-    manifest_setting = scan_config.get("manifest_file")
-    if manifest_setting:
-        scan_manifest_path = resolve_run_path(run_dir, manifest_setting)
-    else:
-        scan_manifest_path = resolve_run_path(scan_dir, "scan_manifest.json")
-    scan_thread_count = thread_count
-    if scan_executor == "local":
-        scan_max_workers, scan_thread_count = _resolve_scan_worker_settings(
-            scan_config,
-            len(scan_points),
-            thread_count,
-        )
-        scan_batch_size = _resolve_scan_batch_size(
-            scan_config,
-            len(scan_points),
-            scan_max_workers,
-        )
-    elif scan_executor == "manifest":
-        scan_thread_count = _resolve_scan_threads_per_worker(scan_config, thread_count)
-
-    if scan_executor in ("local", "manifest"):
-        if thread_count and thread_count != scan_thread_count:
-            logging.warning(
-                "Scan executor %s overrides thread_count=%s to threads_per_worker=%s.",
-                scan_executor,
-                thread_count,
-                scan_thread_count,
-            )
-        thread_status = apply_thread_settings(scan_thread_count)
-        effective_threads = thread_status.get("effective_threads")
-        openmp_available = thread_status.get("openmp_available")
-
-    calc_basis = context["basis"]
-    calc_xc = context["xc"]
-    calc_scf_config = context["scf_config"]
-    calc_solvent_name = context["solvent_name"]
-    calc_solvent_model = context["solvent_model"]
-    calc_eps = context["eps"]
-    calc_dispersion_model = context["dispersion_model"]
-    optimizer_mode = context["optimizer_mode"]
-    optimizer_ase_dict = context["optimizer_ase_dict"]
-    constraints = context["constraints"]
-    scan_seed_chkfile = (
-        calc_scf_config.get("chkfile") if isinstance(calc_scf_config, dict) else None
-    )
-
-    if scan_mode == "single_point":
-        calc_basis = context["sp_basis"]
-        calc_xc = context["sp_xc"]
-        calc_scf_config = context["sp_scf_config"]
-        calc_solvent_name = context["sp_solvent_name"]
-        calc_solvent_model = context["sp_solvent_model"]
-        calc_eps = context["sp_eps"]
-        calc_dispersion_model = context["sp_dispersion_model"]
-
-    scan_summary = {
-        "status": "running",
-        "run_directory": run_dir,
-        "run_started_at": datetime.now().isoformat(),
-        "run_id": run_id,
-        "attempt": context["attempt"],
-        "run_id_history": context["run_id_history"],
-        "pid": os.getpid(),
-        "xyz_file": args.xyz_file,
-        "xyz_file_hash": compute_file_hash(args.xyz_file),
-        "basis": calc_basis,
-        "xc": calc_xc,
-        "solvent": calc_solvent_name,
-        "solvent_model": calc_solvent_model if calc_solvent_name else None,
-        "solvent_eps": calc_eps,
-        "dispersion": calc_dispersion_model,
-        "scan": {
-            "mode": scan_mode,
-            "dimensions": dimensions,
-            "grid_counts": [len(values) for values in values_grid],
-            "total_points": len(scan_points),
-        },
-        "scan_result_file": scan_result_path,
-        "scan_result_csv_file": scan_result_csv_path,
-        "calculation_mode": "scan",
-        "charge": charge,
-        "spin": spin,
-        "multiplicity": multiplicity,
-        "thread_count": scan_thread_count,
-        "effective_thread_count": effective_threads,
-        "openmp_available": openmp_available,
-        "memory_mb": memory_mb,
-        "memory_limit_status": memory_limit_status,
-        "log_file": log_path,
-        "event_log_file": event_log_path,
-        "run_metadata_file": run_metadata_path,
-        "config_file": args.config,
-        "config": context["config_dict"],
-        "config_raw": context["config_raw"],
-        "config_hash": compute_text_hash(context["config_raw"]),
-        "scf_config": calc_scf_config,
-        "scf_settings": calc_scf_config,
-        "environment": collect_environment_snapshot(scan_thread_count),
-        "git": collect_git_metadata(os.getcwd()),
-        "versions": {
-            "ase": get_package_version("ase"),
-            "pyscf": get_package_version("pyscf"),
-            "dftd3": get_package_version("dftd3"),
-            "dftd4": get_package_version("dftd4"),
-        },
-    }
-    scan_summary["scan"].update(
-        {
-            "executor": scan_executor,
-            "max_workers": scan_max_workers if scan_executor == "local" else None,
-            "manifest_file": scan_manifest_path if scan_executor == "manifest" else None,
-            "point_result_dir": points_dir,
-            "threads_per_worker": scan_thread_count,
-            "batch_size": scan_batch_size if scan_executor == "local" else None,
-            "write_interval_points": scan_write_interval_points,
-        }
-    )
-    scan_summary["run_updated_at"] = datetime.now().isoformat()
-    write_run_metadata(run_metadata_path, scan_summary)
-    record_status_event(
-        event_log_path,
-        run_id,
+    executor_state = _resolve_scan_executor_state(
+        scan_config,
         run_dir,
-        "running",
-        previous_status=context.get("previous_status"),
+        scan_dir,
+        len(scan_points),
+        thread_count,
+        openmp_available,
+        effective_threads,
     )
-
-    if scan_executor != "manifest":
-        mol = molecule_context["mol"]
-        run_capability_check(
-            mol,
-            calc_basis,
-            calc_xc,
-            calc_scf_config,
-            calc_solvent_model if calc_solvent_name else None,
-            calc_solvent_name,
-            calc_eps,
-            calc_dispersion_model,
-            "none",
-            dispersion_params=_resolve_d3_params(optimizer_ase_dict),
-            require_hessian=False,
-            verbose=verbose,
-            memory_mb=memory_mb,
-            optimizer_mode=optimizer_mode,
-            multiplicity=multiplicity,
-        )
-    else:
-        logging.info("Manifest executor selected; skipping capability check.")
-
-    logging.info("Starting scan (%s mode) with %d points.", scan_mode, len(scan_points))
-    logging.info("Scan executor: %s", scan_executor)
-    if scan_executor == "local":
-        logging.info("Scan workers: %s", scan_max_workers)
-        if scan_batch_size:
-            logging.info("Scan batch size: %s", scan_batch_size)
-    if scan_thread_count:
-        logging.info("Threads per worker: %s", scan_thread_count)
-    if memory_mb:
-        logging.info("Memory target: %s MB (PySCF max_memory)", memory_mb)
-    if log_path:
-        logging.info("Log file: %s", log_path)
-    if scan_result_path:
-        logging.info("Scan results file: %s", scan_result_path)
-    if scan_result_csv_path:
-        logging.info("Scan results CSV file: %s", scan_result_csv_path)
+    calc_state = _resolve_scan_calculation_state(context, scan_mode)
+    scan_summary = _build_scan_summary(
+        args=args,
+        context=context,
+        run_dir=run_dir,
+        log_path=log_path,
+        run_metadata_path=run_metadata_path,
+        scan_result_path=scan_result_path,
+        scan_result_csv_path=scan_result_csv_path,
+        event_log_path=event_log_path,
+        run_id=run_id,
+        charge=charge,
+        spin=spin,
+        multiplicity=multiplicity,
+        memory_mb=memory_mb,
+        memory_limit_status=memory_limit_status,
+        dimensions=dimensions,
+        values_grid=values_grid,
+        scan_mode=scan_mode,
+        points_dir=points_dir,
+        scan_write_interval_points=scan_write_interval_points,
+        executor_state=executor_state,
+        calc_state=calc_state,
+    )
+    _record_scan_start(scan_summary, run_metadata_path, event_log_path, run_id, run_dir, context)
+    _run_scan_capability_check_if_needed(
+        scan_executor=executor_state["executor"],
+        molecule_context=molecule_context,
+        calc_state=calc_state,
+        verbose=verbose,
+        memory_mb=memory_mb,
+        multiplicity=multiplicity,
+    )
+    _log_scan_execution_plan(
+        scan_mode=scan_mode,
+        point_count=len(scan_points),
+        executor_state=executor_state,
+        memory_mb=memory_mb,
+        log_path=log_path,
+        scan_result_path=scan_result_path,
+        scan_result_csv_path=scan_result_csv_path,
+    )
 
     run_start = time.perf_counter()
-    results_by_index = {}
-    last_scan_write = {"count": 0}
-
-    def _maybe_write_scan_results(force=False):
-        if not results_by_index:
-            return
-        completed = len(results_by_index)
-        if (
-            force
-            or scan_write_interval_points <= 1
-            or completed - last_scan_write["count"] >= scan_write_interval_points
-        ):
-            _write_scan_results(results_by_index, scan_result_path, scan_result_csv_path)
-            scan_summary["scan"]["completed_points"] = completed
-            scan_summary["run_updated_at"] = datetime.now().isoformat()
-            write_run_metadata(run_metadata_path, scan_summary)
-            last_scan_write["count"] = completed
+    results_by_index: dict[int, dict[str, object]] = {}
+    maybe_write_scan_results = _build_scan_result_writer(
+        results_by_index=results_by_index,
+        scan_result_path=scan_result_path,
+        scan_result_csv_path=scan_result_csv_path,
+        scan_write_interval_points=scan_write_interval_points,
+        scan_summary=scan_summary,
+        run_metadata_path=run_metadata_path,
+    )
     try:
-        if scan_executor == "manifest":
-            manifest_settings = {
-                "basis": calc_basis,
-                "xc": calc_xc,
-                "scf_config": calc_scf_config,
-                "seed_chkfile": scan_seed_chkfile,
-                "solvent": calc_solvent_name,
-                "solvent_model": calc_solvent_model if calc_solvent_name else None,
-                "solvent_eps": calc_eps,
-                "dispersion": calc_dispersion_model,
-                "optimizer_mode": optimizer_mode,
-                "optimizer_ase": optimizer_ase_dict,
-                "constraints": constraints,
-                "charge": charge,
-                "spin": spin,
-                "multiplicity": multiplicity,
-                "memory_mb": memory_mb,
-                "verbose": verbose,
-                "thread_count": scan_thread_count,
-                "threads_per_worker": scan_thread_count,
-                "write_interval_points": scan_write_interval_points,
-                "profiling_enabled": profiling_enabled,
-            }
-            _write_scan_manifest(
-                manifest_path=scan_manifest_path,
+        if executor_state["executor"] == "manifest":
+            _execute_manifest_scan(
+                args=args,
+                executor_state=executor_state,
                 scan_dir=scan_dir,
                 run_dir=run_dir,
-                xyz_file=args.xyz_file,
                 scan_mode=scan_mode,
                 dimensions=dimensions,
                 scan_points=scan_points,
-                settings=manifest_settings,
+                calc_state=calc_state,
+                charge=charge,
+                spin=spin,
+                multiplicity=multiplicity,
+                memory_mb=memory_mb,
+                verbose=verbose,
+                scan_write_interval_points=scan_write_interval_points,
+                profiling_enabled=profiling_enabled,
             )
-            logging.info("Wrote scan manifest to %s", scan_manifest_path)
-            scan_summary["scan"]["completed_points"] = 0
-            scan_summary["summary"] = {
-                "elapsed_seconds": time.perf_counter() - run_start,
-                "n_points": 0,
-                "planned_points": len(scan_points),
-                "converged_points": 0,
-                "final_energy": None,
-                "manifest_only": True,
-            }
-            scan_summary["summary"]["memory_limit_enforced"] = memory_limit_enforced
-            finalize_metadata(
-                run_metadata_path,
-                event_log_path,
-                run_id,
-                run_dir,
-                scan_summary,
-                status="completed",
-                previous_status="running",
+            _finalize_scan_manifest_only(
+                run_start=run_start,
+                scan_points=scan_points,
+                memory_limit_enforced=memory_limit_enforced,
+                run_metadata_path=run_metadata_path,
+                event_log_path=event_log_path,
+                run_id=run_id,
+                run_dir=run_dir,
+                scan_summary=scan_summary,
                 queue_update_fn=queue_update_fn,
-                exit_code=0,
             )
             return
 
-        if scan_executor == "local":
-            error = None
-            batch_size = scan_batch_size or 1
-            batches = _build_scan_batches(scan_points, batch_size)
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=scan_max_workers
-            ) as executor:
-                futures = {}
-                for batch in batches:
-                    futures[
-                        executor.submit(
-                            _run_scan_batch,
-                            batch_items=batch,
-                            dimensions=dimensions,
-                            scan_mode=scan_mode,
-                            xyz_file=args.xyz_file,
-                            seed_chkfile=scan_seed_chkfile,
-                            scan_dir=scan_dir,
-                            run_dir=run_dir,
-                            charge=charge,
-                            spin=spin,
-                            multiplicity=multiplicity,
-                            basis=calc_basis,
-                            xc=calc_xc,
-                            scf_config=calc_scf_config,
-                            solvent_name=calc_solvent_name,
-                            solvent_model=calc_solvent_model,
-                            solvent_eps=calc_eps,
-                            dispersion_model=calc_dispersion_model,
-                            optimizer_mode=optimizer_mode,
-                            optimizer_ase_dict=optimizer_ase_dict,
-                            constraints=constraints,
-                            verbose=verbose,
-                            memory_mb=memory_mb,
-                            thread_count=scan_thread_count,
-                            parallel=True,
-                            profiling_enabled=profiling_enabled,
-                        )
-                    ] = batch
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        batch_result = future.result()
-                    except Exception as exc:
-                        logging.exception("Scan batch failed.")
-                        error = exc
-                        continue
-                    for point_result in batch_result.get("results", []):
-                        results_by_index[point_result["index"]] = point_result
-                    for failure in batch_result.get("errors", []):
-                        logging.error(
-                            "Scan point %s failed: %s",
-                            failure.get("index"),
-                            failure.get("error"),
-                        )
-                        if failure.get("traceback"):
-                            logging.error("%s", failure.get("traceback"))
-                        if error is None:
-                            error = RuntimeError(
-                                "Scan point {index} failed: {error}".format(
-                                    index=failure.get("index"),
-                                    error=failure.get("error"),
-                                )
-                            )
-                    if batch_result.get("results") or batch_result.get("errors"):
-                        _maybe_write_scan_results(force=bool(batch_result.get("errors")))
-            if error:
-                _maybe_write_scan_results(force=True)
-                raise error
+        if executor_state["executor"] == "local":
+            _execute_local_scan(
+                args=args,
+                dimensions=dimensions,
+                scan_mode=scan_mode,
+                scan_points=scan_points,
+                scan_dir=scan_dir,
+                run_dir=run_dir,
+                charge=charge,
+                spin=spin,
+                multiplicity=multiplicity,
+                calc_state=calc_state,
+                verbose=verbose,
+                memory_mb=memory_mb,
+                executor_state=executor_state,
+                profiling_enabled=profiling_enabled,
+                results_by_index=results_by_index,
+                maybe_write_scan_results=maybe_write_scan_results,
+            )
         else:
-            atoms_template = None
-            if scan_executor == "serial":
-                from ase.io import read as ase_read
+            _execute_serial_scan(
+                args=args,
+                scan_executor=executor_state["executor"],
+                dimensions=dimensions,
+                scan_mode=scan_mode,
+                scan_points=scan_points,
+                scan_dir=scan_dir,
+                run_dir=run_dir,
+                charge=charge,
+                spin=spin,
+                multiplicity=multiplicity,
+                calc_state=calc_state,
+                verbose=verbose,
+                memory_mb=memory_mb,
+                executor_state=executor_state,
+                profiling_enabled=profiling_enabled,
+                results_by_index=results_by_index,
+                maybe_write_scan_results=maybe_write_scan_results,
+            )
 
-                atoms_template = ase_read(args.xyz_file)
-            for index, values in enumerate(scan_points):
-                point_result = _run_scan_point(
-                    index=index,
-                    values=values,
-                    dimensions=dimensions,
-                    scan_mode=scan_mode,
-                    xyz_file=args.xyz_file,
-                    atoms_template=atoms_template,
-                    seed_chkfile=scan_seed_chkfile,
-                    scan_dir=scan_dir,
-                    run_dir=run_dir,
-                    charge=charge,
-                    spin=spin,
-                    multiplicity=multiplicity,
-                    basis=calc_basis,
-                    xc=calc_xc,
-                    scf_config=calc_scf_config,
-                    solvent_name=calc_solvent_name,
-                    solvent_model=calc_solvent_model,
-                    solvent_eps=calc_eps,
-                    dispersion_model=calc_dispersion_model,
-                    optimizer_mode=optimizer_mode,
-                    optimizer_ase_dict=optimizer_ase_dict,
-                    constraints=constraints,
-                    verbose=verbose,
-                    memory_mb=memory_mb,
-                    thread_count=scan_thread_count,
-                    parallel=False,
-                    profiling_enabled=profiling_enabled,
-                )
-                results_by_index[index] = point_result
-                _maybe_write_scan_results()
-        results = _write_scan_results(
-            results_by_index, scan_result_path, scan_result_csv_path
-        )
-        elapsed_seconds = time.perf_counter() - run_start
-        converged_points = sum(
-            1 for item in results if item.get("converged") is True
-        )
-        scan_summary["summary"] = {
-            "elapsed_seconds": elapsed_seconds,
-            "n_points": len(results),
-            "converged_points": converged_points,
-            "final_energy": results[-1]["energy"] if results else None,
-            "converged": converged_points == len(results) if results else False,
-        }
-        scan_summary["summary"]["memory_limit_enforced"] = memory_limit_enforced
-        finalize_metadata(
-            run_metadata_path,
-            event_log_path,
-            run_id,
-            run_dir,
-            scan_summary,
-            status="completed",
-            previous_status="running",
+        _finalize_scan_with_results(
+            results_by_index=results_by_index,
+            scan_result_path=scan_result_path,
+            scan_result_csv_path=scan_result_csv_path,
+            run_start=run_start,
+            scan_summary=scan_summary,
+            memory_limit_enforced=memory_limit_enforced,
+            run_metadata_path=run_metadata_path,
+            event_log_path=event_log_path,
+            run_id=run_id,
+            run_dir=run_dir,
             queue_update_fn=queue_update_fn,
-            exit_code=0,
         )
     except Exception as exc:
         logging.exception("Scan calculation failed.")

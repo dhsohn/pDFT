@@ -13,7 +13,11 @@ from run_opt_config import (
 )
 from run_opt_dispersion import load_d3_calculator, parse_dispersion_settings
 from run_opt_resources import ensure_parent_dir, resolve_run_path
-from run_opt_utils import extract_step_count
+from run_opt_utils import (
+    extract_step_count,
+    normalize_constraints,
+    normalize_solvent_key,
+)
 
 
 def normalize_xc_functional(xc):
@@ -49,98 +53,25 @@ def _collect_constraint_jacobians(atoms, constraints):
     import numpy as np
     from ase.constraints import FixInternals
 
-    if not constraints:
+    bond_entries, angle_entries, dihedral_entries = normalize_constraints(
+        constraints,
+        atom_count=len(atoms),
+    )
+    if not bond_entries and not angle_entries and not dihedral_entries:
         return None
-    if not isinstance(constraints, dict):
-        raise ValueError("Config 'constraints' must be an object.")
-    bonds = constraints.get("bonds") or []
-    angles = constraints.get("angles") or []
-    dihedrals = constraints.get("dihedrals") or []
-    if not bonds and not angles and not dihedrals:
-        return None
-
-    atom_count = len(atoms)
-
-    def _validate_index(value, path):
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ValueError(f"{path} must be an integer.")
-        if value < 0 or value >= atom_count:
-            raise ValueError(
-                f"{path} index {value} is out of range for {atom_count} atoms."
-            )
-
-    def _validate_number(value, path):
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise ValueError(f"{path} must be a number.")
-
-    bond_entries = []
-    for idx, bond in enumerate(bonds):
-        if not isinstance(bond, dict):
-            raise ValueError(f"constraints.bonds[{idx}] must be an object.")
-        for key in ("i", "j"):
-            if key not in bond:
-                raise ValueError(f"constraints.bonds[{idx}] must define '{key}'.")
-            _validate_index(bond[key], f"constraints.bonds[{idx}].{key}")
-        if "length" not in bond:
-            raise ValueError(f"constraints.bonds[{idx}] must define 'length'.")
-        _validate_number(bond["length"], f"constraints.bonds[{idx}].length")
-        if bond["length"] <= 0:
-            raise ValueError(
-                f"constraints.bonds[{idx}].length must be > 0 (Angstrom)."
-            )
-        bond_entries.append([float(bond["length"]), [bond["i"], bond["j"]]])
-
-    angle_entries = []
-    for idx, angle in enumerate(angles):
-        if not isinstance(angle, dict):
-            raise ValueError(f"constraints.angles[{idx}] must be an object.")
-        for key in ("i", "j", "k"):
-            if key not in angle:
-                raise ValueError(f"constraints.angles[{idx}] must define '{key}'.")
-            _validate_index(angle[key], f"constraints.angles[{idx}].{key}")
-        if "angle" not in angle:
-            raise ValueError(f"constraints.angles[{idx}] must define 'angle'.")
-        _validate_number(angle["angle"], f"constraints.angles[{idx}].angle")
-        if not (0 < angle["angle"] <= 180):
-            raise ValueError(
-                f"constraints.angles[{idx}].angle must be between 0 and 180 degrees."
-            )
-        angle_entries.append(
-            [float(angle["angle"]), [angle["i"], angle["j"], angle["k"]]]
-        )
-
-    dihedral_entries = []
-    for idx, dihedral in enumerate(dihedrals):
-        if not isinstance(dihedral, dict):
-            raise ValueError(f"constraints.dihedrals[{idx}] must be an object.")
-        for key in ("i", "j", "k", "l"):
-            if key not in dihedral:
-                raise ValueError(f"constraints.dihedrals[{idx}] must define '{key}'.")
-            _validate_index(dihedral[key], f"constraints.dihedrals[{idx}].{key}")
-        if "dihedral" not in dihedral:
-            raise ValueError(f"constraints.dihedrals[{idx}] must define 'dihedral'.")
-        _validate_number(
-            dihedral["dihedral"], f"constraints.dihedrals[{idx}].dihedral"
-        )
-        if not (-180 <= dihedral["dihedral"] <= 180):
-            raise ValueError(
-                "constraints.dihedrals[{idx}].dihedral must be between -180 and 180 "
-                "degrees.".format(idx=idx)
-            )
-        dihedral_entries.append(
-            [
-                float(dihedral["dihedral"]),
-                [dihedral["i"], dihedral["j"], dihedral["k"], dihedral["l"]],
-            ]
-        )
 
     fix = FixInternals(
-        bonds=bond_entries or None,
-        angles_deg=angle_entries or None,
-        dihedrals_deg=dihedral_entries or None,
+        bonds=[[length, [i, j]] for i, j, length in bond_entries] or None,
+        angles_deg=[[angle, [i, j, k]] for i, j, k, angle in angle_entries] or None,
+        dihedrals_deg=[
+            [dihedral, [i, j, k, atom_l]]
+            for i, j, k, atom_l, dihedral in dihedral_entries
+        ]
+        or None,
     )
     fix.initialize(atoms)
     jacobians = []
+    atom_count = len(atoms)
     for constraint in fix.constraints:
         constraint.setup_jacobian(atoms.positions)
         jac = np.asarray(constraint.jacobian, dtype=float).reshape(-1)
@@ -711,7 +642,7 @@ def apply_solvent_model(
             )
         supported = _supported_smd_solvents()
         supported_map = _cached_smd_supported_map()
-        normalized = _normalize_solvent_key(solvent_name)
+        normalized = normalize_solvent_key(solvent_name)
         if normalized in SMD_UNSUPPORTED_SOLVENT_KEYS:
             raise ValueError(
                 "SMD solvent '{name}' is not supported by PySCF SMD. "
@@ -737,20 +668,15 @@ def apply_solvent_model(
         raise ValueError(f"Unsupported solvent model '{solvent_model}'.")
     return mf
 
-
-def _normalize_solvent_key(name):
-    return "".join(char for char in name.lower() if char.isalnum())
-
-
 _SMD_SOLVENT_ALIASES = {
-    _normalize_solvent_key("diethyl ether"): "diethylether",
-    _normalize_solvent_key("isopropanol"): "2-propanol",
-    _normalize_solvent_key("dmso"): "dimethylsulfoxide",
-    _normalize_solvent_key("ethylene glycol"): "1,2-ethanediol",
-    _normalize_solvent_key("ethyl acetate"): "ethylethanoate",
-    _normalize_solvent_key("hexane"): "n-hexane",
-    _normalize_solvent_key("dmf"): "N,N-dimethylformamide",
-    _normalize_solvent_key("heptane"): "n-heptane",
+    normalize_solvent_key("diethyl ether"): "diethylether",
+    normalize_solvent_key("isopropanol"): "2-propanol",
+    normalize_solvent_key("dmso"): "dimethylsulfoxide",
+    normalize_solvent_key("ethylene glycol"): "1,2-ethanediol",
+    normalize_solvent_key("ethyl acetate"): "ethylethanoate",
+    normalize_solvent_key("hexane"): "n-hexane",
+    normalize_solvent_key("dmf"): "N,N-dimethylformamide",
+    normalize_solvent_key("heptane"): "n-heptane",
 }
 
 
@@ -759,11 +685,11 @@ def _build_smd_supported_map(supported=None):
         supported = _supported_smd_solvents()
     supported_map = {}
     for name in supported:
-        key = _normalize_solvent_key(name)
+        key = normalize_solvent_key(name)
         if key and key not in supported_map:
             supported_map[key] = name
     for alias_key, canonical in _SMD_SOLVENT_ALIASES.items():
-        canonical_key = _normalize_solvent_key(canonical)
+        canonical_key = normalize_solvent_key(canonical)
         canonical_name = supported_map.get(canonical_key)
         if canonical_name and alias_key not in supported_map:
             supported_map[alias_key] = canonical_name
@@ -1086,417 +1012,279 @@ def _project_imaginary_mode_to_internal_coordinates(
     }
 
 
-def compute_frequencies(
-    mol,
-    basis,
-    xc,
-    scf_config,
-    solvent_model,
-    solvent_name,
-    solvent_eps,
+def _atoms_from_molecule(mol_handle, atoms_cls):
+    positions = mol_handle.atom_coords(unit="Angstrom")
+    if hasattr(mol_handle, "atom_symbols"):
+        symbols = mol_handle.atom_symbols()
+    else:
+        symbols = [mol_handle.atom_symbol(i) for i in range(mol_handle.natm)]
+    return atoms_cls(symbols=symbols, positions=positions)
+
+
+def _build_dispersion_calculator(atoms, dispersion_settings):
+    backend = dispersion_settings["backend"]
+    settings = dispersion_settings["settings"]
+    if backend == "d3":
+        d3_cls, _ = load_d3_calculator()
+        if d3_cls is None:
+            raise ImportError(
+                "DFTD3 dispersion requested but no DFTD3 calculator is available. "
+                "Install `dftd3` (recommended)."
+            )
+        return d3_cls(atoms=atoms, **settings), "dftd3"
+    from dftd4.ase import DFTD4
+
+    return DFTD4(atoms=atoms, **settings), "ase-dftd4"
+
+
+def _compute_dispersion_hessian_numerical(atoms, step):
+    import numpy as np
+
+    base_positions = atoms.get_positions()
+    natoms = len(base_positions)
+    hessian = np.zeros((natoms, natoms, 3, 3), dtype=float)
+    for atom_idx in range(natoms):
+        for coord in range(3):
+            pos_plus = base_positions.copy()
+            pos_plus[atom_idx, coord] += step
+            atoms.set_positions(pos_plus)
+            forces_plus = atoms.get_forces()
+            pos_minus = base_positions.copy()
+            pos_minus[atom_idx, coord] -= step
+            atoms.set_positions(pos_minus)
+            forces_minus = atoms.get_forces()
+            delta_forces = (forces_plus - forces_minus) / (2.0 * step)
+            hessian[:, atom_idx, :, coord] = -delta_forces
+    atoms.set_positions(base_positions)
+    return hessian
+
+
+def _prepare_frequency_dispersion_payload(
+    *,
+    mol_freq,
+    atoms,
+    atoms_cls,
     dispersion,
+    xc,
     dispersion_hessian_mode,
     dispersion_hessian_step,
     dispersion_params,
-    thermo,
-    verbose,
-    memory_mb,
-    constraints,
-    run_dir=None,
-    optimizer_mode=None,
-    multiplicity=None,
-    ts_quality=None,
-    profiling_enabled=False,
-    log_override=True,
+    profiling,
+    units,
 ):
-    from ase import units
-    from ase import Atoms
-    from ase.data import atomic_masses, atomic_numbers
-    import numpy as np
-    from pyscf import dft, hessian as pyscf_hessian
-    from pyscf.data import nist
-    from pyscf.hessian import thermo as pyscf_thermo
+    payload = {"energy_hartree": 0.0, "info": None, "hessian": None}
+    if dispersion is None:
+        return payload, atoms
 
-    xc = normalize_xc_functional(xc)
-    profiling = None
-    if profiling_enabled:
-        profiling = {
-            "scf_seconds": None,
-            "scf_cycles": None,
-            "hessian_seconds": None,
-            "dispersion_hessian_seconds": None,
-        }
-    if dispersion_hessian_mode == "none":
-        dispersion = None
-    mol_freq = mol.copy()
-    if basis:
-        mol_freq.basis = basis
-        mol_freq.build()
-    if memory_mb:
-        mol_freq.max_memory = memory_mb
-
-    def _build_mf_freq(*, apply_density_fit, scf_override=None):
-        scf_settings = scf_override if scf_override is not None else scf_config
-        ks_type = select_ks_type(
-            mol=mol_freq,
-            scf_config=scf_settings,
-            optimizer_mode=optimizer_mode,
-            multiplicity=multiplicity,
-            log_override=log_override,
-        )
-        if ks_type == "RKS":
-            mf_freq = dft.RKS(mol_freq)
-        else:
-            mf_freq = dft.UKS(mol_freq)
-        mf_freq.xc = xc
-        density_fit_applied = False
-        if apply_density_fit:
-            mf_freq, df_config = apply_density_fit_setting(mf_freq, scf_settings)
-            density_fit_applied = bool(df_config.get("density_fit"))
-        if solvent_model is not None:
-            mf_freq = apply_solvent_model(
-                mf_freq,
-                solvent_model,
-                solvent_name,
-                solvent_eps,
-            )
-        if verbose:
-            mf_freq.verbose = 4
-        mf_freq, _ = apply_scf_settings(mf_freq, scf_settings, apply_density_fit=False)
-        return mf_freq, {"density_fit_applied": density_fit_applied}
-
-    def _build_dispersion_calculator(atoms, dispersion_settings):
-        backend = dispersion_settings["backend"]
-        settings = dispersion_settings["settings"]
-        if backend == "d3":
-            d3_cls, _ = load_d3_calculator()
-            if d3_cls is None:
-                raise ImportError(
-                    "DFTD3 dispersion requested but no DFTD3 calculator is available. "
-                    "Install `dftd3` (recommended)."
-                )
-            return d3_cls(atoms=atoms, **settings), "dftd3"
-        from dftd4.ase import DFTD4
-
-        return DFTD4(atoms=atoms, **settings), "ase-dftd4"
-
-    def _compute_dispersion_hessian(atoms, step):
-        base_positions = atoms.get_positions()
-        natoms = len(base_positions)
-        hessian = np.zeros((natoms, natoms, 3, 3), dtype=float)
-        for atom_idx in range(natoms):
-            for coord in range(3):
-                pos_plus = base_positions.copy()
-                pos_plus[atom_idx, coord] += step
-                atoms.set_positions(pos_plus)
-                forces_plus = atoms.get_forces()
-                pos_minus = base_positions.copy()
-                pos_minus[atom_idx, coord] -= step
-                atoms.set_positions(pos_minus)
-                forces_minus = atoms.get_forces()
-                delta_forces = (forces_plus - forces_minus) / (2.0 * step)
-                hessian[:, atom_idx, :, coord] = -delta_forces
-        atoms.set_positions(base_positions)
-        return hessian
-
-    atoms = None
-    if dispersion is not None or constraints:
-        positions = mol_freq.atom_coords(unit="Angstrom")
-        if hasattr(mol_freq, "atom_symbols"):
-            symbols = mol_freq.atom_symbols()
-        else:
-            symbols = [mol_freq.atom_symbol(i) for i in range(mol_freq.natm)]
-        atoms = Atoms(symbols=symbols, positions=positions)
-    dispersion_payload = {"energy_hartree": 0.0, "info": None, "hessian": None}
-    if dispersion is not None:
-        dispersion_settings = parse_dispersion_settings(
-            dispersion,
-            xc,
-            charge=mol_freq.charge,
-            spin=mol_freq.spin,
-            d3_params=dispersion_params,
-        )
-        dispersion_calc, dispersion_backend = _build_dispersion_calculator(
-            atoms, dispersion_settings
-        )
-        atoms.calc = dispersion_calc
-        dispersion_energy_ev = dispersion_calc.get_potential_energy(atoms=atoms)
-        dispersion_energy_hartree = dispersion_energy_ev / units.Hartree
-        dispersion_payload["energy_hartree"] = dispersion_energy_hartree
-        dispersion_info = {
-            "model": dispersion,
-            "energy_hartree": dispersion_energy_hartree,
-            "energy_ev": dispersion_energy_ev,
-            "backend": dispersion_backend,
-            "hessian_mode": dispersion_hessian_mode,
-        }
-        if dispersion_hessian_mode == "numerical":
-            step = dispersion_hessian_step if dispersion_hessian_step is not None else 0.005
-            dispersion_hessian_start = time.perf_counter() if profiling else None
-            dispersion_hessian = _compute_dispersion_hessian(atoms, step)
-            if dispersion_hessian_start is not None:
-                profiling["dispersion_hessian_seconds"] = (
-                    time.perf_counter() - dispersion_hessian_start
-                )
-            dispersion_hessian *= (1.0 / units.Hartree) / (units.Bohr ** 2)
-            dispersion_payload["hessian"] = dispersion_hessian
-            dispersion_info["hessian_step"] = step
-        dispersion_payload["info"] = dispersion_info
-
-    def _apply_dispersion(energy_value):
-        if dispersion_payload["info"] is None:
-            return energy_value, None, None
-        energy_value += dispersion_payload["energy_hartree"]
-        return energy_value, dispersion_payload["info"], dispersion_payload["hessian"]
-
-    scf_start = time.perf_counter() if profiling else None
-    energy, mf_freq, info = _run_scf_with_retries(
-        lambda scf_settings: _build_mf_freq(
-            apply_density_fit=True, scf_override=scf_settings
-        ),
-        scf_config,
-        run_dir,
-        "Frequency SCF",
+    if atoms is None:
+        atoms = _atoms_from_molecule(mol_freq, atoms_cls)
+    dispersion_settings = parse_dispersion_settings(
+        dispersion,
+        xc,
+        charge=mol_freq.charge,
+        spin=mol_freq.spin,
+        d3_params=dispersion_params,
     )
-    if scf_start is not None:
-        profiling["scf_seconds"] = time.perf_counter() - scf_start
-        profiling["scf_cycles"] = extract_step_count(mf_freq)
-    density_fit_applied = bool(info.get("density_fit_applied"))
-    energy, dispersion_info, dispersion_hessian = _apply_dispersion(energy)
-
-    def _compute_hessian(mf_handle):
-        hess_start = time.perf_counter() if profiling else None
-        if hasattr(mf_handle, "Hessian"):
-            hess_value = mf_handle.Hessian().kernel()
-        else:
-            hess_value = pyscf_hessian.Hessian(mf_handle).kernel()
-        if hess_start is None:
-            return hess_value, None
-        return hess_value, time.perf_counter() - hess_start
-
-    try:
-        hess, hess_seconds = _compute_hessian(mf_freq)
-        if hess_seconds is not None:
-            profiling["hessian_seconds"] = hess_seconds
-    except Exception as exc:
-        if density_fit_applied and is_density_fit_gradient_einsum_error(exc):
-            logging.warning(
-                "Density-fitting Hessian failed; retrying without density fitting."
+    dispersion_calc, dispersion_backend = _build_dispersion_calculator(
+        atoms, dispersion_settings
+    )
+    atoms.calc = dispersion_calc
+    dispersion_energy_ev = dispersion_calc.get_potential_energy(atoms=atoms)
+    dispersion_energy_hartree = dispersion_energy_ev / units.Hartree
+    payload["energy_hartree"] = dispersion_energy_hartree
+    dispersion_info = {
+        "model": dispersion,
+        "energy_hartree": dispersion_energy_hartree,
+        "energy_ev": dispersion_energy_ev,
+        "backend": dispersion_backend,
+        "hessian_mode": dispersion_hessian_mode,
+    }
+    if dispersion_hessian_mode == "numerical":
+        step = dispersion_hessian_step if dispersion_hessian_step is not None else 0.005
+        dispersion_hessian_start = time.perf_counter() if profiling else None
+        dispersion_hessian = _compute_dispersion_hessian_numerical(atoms, step)
+        if dispersion_hessian_start is not None:
+            profiling["dispersion_hessian_seconds"] = (
+                time.perf_counter() - dispersion_hessian_start
             )
-            scf_retry_start = time.perf_counter() if profiling else None
-            energy, mf_freq, info = _run_scf_with_retries(
-                lambda scf_settings: _build_mf_freq(
-                    apply_density_fit=False, scf_override=scf_settings
-                ),
-                scf_config,
-                run_dir,
-                "Frequency SCF (no density fit)",
-            )
-            if scf_retry_start is not None:
-                profiling["scf_seconds"] = (profiling["scf_seconds"] or 0.0) + (
-                    time.perf_counter() - scf_retry_start
-                )
-                retry_cycles = extract_step_count(mf_freq)
-                if retry_cycles is not None:
-                    profiling["scf_cycles"] = (profiling["scf_cycles"] or 0) + retry_cycles
-            density_fit_applied = bool(info.get("density_fit_applied"))
-            energy, dispersion_info, dispersion_hessian = _apply_dispersion(energy)
-            hess, hess_seconds = _compute_hessian(mf_freq)
-            if hess_seconds is not None:
-                profiling["hessian_seconds"] = (
-                    (profiling["hessian_seconds"] or 0.0) + hess_seconds
-                )
-        else:
-            raise
-    if dispersion_hessian is not None:
-        hess = hess + dispersion_hessian
-    constraint_projection = None
-    if constraints:
-        constraint_projection = {
-            "requested": True,
-            "projected": False,
-            "count": 0,
-            "error": None,
-        }
-        try:
-            if atoms is None:
-                positions = mol_freq.atom_coords(unit="Angstrom")
-                if hasattr(mol_freq, "atom_symbols"):
-                    symbols = mol_freq.atom_symbols()
-                else:
-                    symbols = [mol_freq.atom_symbol(i) for i in range(mol_freq.natm)]
-                atoms = Atoms(symbols=symbols, positions=positions)
-            jacobians = _collect_constraint_jacobians(atoms, constraints)
-            if jacobians is None:
-                constraint_projection["error"] = "no_constraints"
-            else:
-                constraint_projection["count"] = jacobians.shape[0]
-                hess = _project_hessian_constraints(hess, mol_freq, jacobians)
-                constraint_projection["projected"] = True
-                logging.info(
-                    "Applied constraint-projected Hessian (%s constraints).",
-                    constraint_projection["count"],
-                )
-        except Exception as exc:
-            constraint_projection["error"] = str(exc)
-            logging.warning("Constraint-projected Hessian skipped: %s", exc)
-    harmonic = pyscf_thermo.harmonic_analysis(mol_freq, hess, imaginary_freq=False)
-    freq_wavenumber = None
-    freq_au = None
-    zpe = None
-    if harmonic:
-        freq_wavenumber = harmonic.get("freq_wavenumber")
-        freq_au = harmonic.get("freq_au")
-        for key in ("zpe", "ZPE", "zero_point_energy", "zero_point_energy_hartree", "zpve", "ZPVE"):
-            if key in harmonic:
-                zpe = harmonic.get(key)
-                break
+        dispersion_hessian *= (1.0 / units.Hartree) / (units.Bohr ** 2)
+        payload["hessian"] = dispersion_hessian
+        dispersion_info["hessian_step"] = step
+    payload["info"] = dispersion_info
+    return payload, atoms
 
-    def _to_list(values):
-        if values is None:
-            return None
-        if hasattr(values, "tolist"):
-            return values.tolist()
-        return list(values)
 
-    def _to_scalar(value):
-        if value is None:
-            return None
-        if hasattr(value, "item"):
-            return value.item()
-        if hasattr(value, "tolist"):
-            return value.tolist()
-        return value
+def _apply_dispersion_payload(energy_value, dispersion_payload):
+    if dispersion_payload["info"] is None:
+        return energy_value, None, None
+    energy_value += dispersion_payload["energy_hartree"]
+    return energy_value, dispersion_payload["info"], dispersion_payload["hessian"]
 
-    freq_wavenumber_list = _to_list(freq_wavenumber)
-    freq_au_list = _to_list(freq_au)
-    zpe_value = _to_scalar(zpe)
-    thermochemistry = None
+
+def _to_list(values):
+    if values is None:
+        return None
+    if hasattr(values, "tolist"):
+        return values.tolist()
+    return list(values)
+
+
+def _to_scalar(value):
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        return value.item()
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    return value
+
+
+def _build_thermochemistry_payload(
+    *,
+    mf_freq,
+    freq_au,
+    thermo,
+    zpe_value,
+    energy,
+    dispersion_info,
+    solvent_model,
+    solvent_name,
+    nist,
+    pyscf_thermo,
+):
     thermo_settings = None
     if thermo:
         if hasattr(thermo, "to_dict"):
             thermo_settings = thermo.to_dict()
         elif isinstance(thermo, dict):
             thermo_settings = thermo
-    if thermo_settings:
-        temperature = thermo_settings.get("T")
-        pressure = thermo_settings.get("P")
-        pressure_unit = thermo_settings.get("unit")
-        thermo_result = None
-        if freq_au is not None:
-            try:
-                thermo_result = pyscf_thermo.thermo(
-                    mf_freq,
-                    freq_au,
-                    temperature=temperature,
-                    pressure=pressure,
-                    unit=pressure_unit,
-                )
-            except TypeError as exc:
-                if "unit" not in str(exc):
-                    raise
-                thermo_result = pyscf_thermo.thermo(
-                    mf_freq,
-                    freq_au,
-                    temperature=temperature,
-                    pressure=pressure,
-                )
+    if not thermo_settings:
+        return None
 
-        def _thermo_value(keys):
-            if not thermo_result:
-                return None
-            for key in keys:
-                if key in thermo_result:
-                    return thermo_result[key]
+    temperature = thermo_settings.get("T")
+    pressure = thermo_settings.get("P")
+    pressure_unit = thermo_settings.get("unit")
+    thermo_result = None
+    if freq_au is not None:
+        try:
+            thermo_result = pyscf_thermo.thermo(
+                mf_freq,
+                freq_au,
+                temperature=temperature,
+                pressure=pressure,
+                unit=pressure_unit,
+            )
+        except TypeError as exc:
+            if "unit" not in str(exc):
+                raise
+            thermo_result = pyscf_thermo.thermo(
+                mf_freq,
+                freq_au,
+                temperature=temperature,
+                pressure=pressure,
+            )
+
+    def _thermo_value(keys):
+        if not thermo_result:
             return None
+        for key in keys:
+            if key in thermo_result:
+                return thermo_result[key]
+        return None
 
-        zpe_thermo = _thermo_value(
-            ("zpe", "ZPE", "zpve", "ZPVE", "zero_point_energy", "zero_point_energy_hartree")
-        )
-        enthalpy_total = _thermo_value(("H", "enthalpy"))
-        gibbs_total = _thermo_value(("G", "gibbs"))
-        entropy = _thermo_value(("S", "entropy"))
-        zpe_for_thermo = _to_scalar(zpe_thermo) if zpe_thermo is not None else zpe_value
-        enthalpy_total_value = _to_scalar(enthalpy_total)
-        gibbs_total_value = _to_scalar(gibbs_total)
-        entropy_value = _to_scalar(entropy)
-        dispersion_energy_hartree = (
-            dispersion_info.get("energy_hartree") if dispersion_info else None
-        )
-        if dispersion_energy_hartree is not None:
-            if enthalpy_total_value is not None:
-                enthalpy_total_value += dispersion_energy_hartree
-            if gibbs_total_value is not None:
-                gibbs_total_value += dispersion_energy_hartree
-        standard_state = None
-        standard_state_correction = None
-        if solvent_model and solvent_name and str(solvent_name).strip().lower() != "vacuum":
-            temperature_value = None
-            pressure_value_pa = None
-            temp_entry = thermo_result.get("temperature") if thermo_result else None
-            if isinstance(temp_entry, (list, tuple)) and temp_entry:
-                temperature_value = _to_scalar(temp_entry[0])
-            elif temp_entry is not None:
-                temperature_value = _to_scalar(temp_entry)
-            if temperature_value is None and temperature is not None:
-                temperature_value = _to_scalar(temperature)
-            pressure_entry = thermo_result.get("pressure") if thermo_result else None
-            if isinstance(pressure_entry, (list, tuple)) and pressure_entry:
-                pressure_value_pa = _to_scalar(pressure_entry[0])
-            elif pressure_entry is not None:
-                pressure_value_pa = _to_scalar(pressure_entry)
-            if pressure_value_pa is None and pressure is not None:
-                unit = str(pressure_unit or "pa").strip().lower()
-                if unit in ("atm", "atmosphere", "atmospheres"):
-                    pressure_value_pa = float(pressure) * 101325.0
-                elif unit in ("bar", "bars"):
-                    pressure_value_pa = float(pressure) * 100000.0
-                elif unit in ("kpa",):
-                    pressure_value_pa = float(pressure) * 1000.0
-                elif unit in ("mpa",):
-                    pressure_value_pa = float(pressure) * 1_000_000.0
-                elif unit in ("torr", "mmhg"):
-                    pressure_value_pa = float(pressure) * 133.322368
-                else:
-                    pressure_value_pa = float(pressure)
-            if temperature_value and pressure_value_pa:
-                ratio = (
-                    1000.0
-                    * nist.AVOGADRO
-                    * nist.BOLTZMANN
-                    * float(temperature_value)
-                    / float(pressure_value_pa)
-                )
-                if ratio > 0:
-                    standard_state_correction = (
-                        nist.BOLTZMANN
-                        * float(temperature_value)
-                        * math.log(ratio)
-                        / nist.HARTREE2J
-                    )
-                    standard_state = "1M"
-                    if gibbs_total_value is not None:
-                        gibbs_total_value += standard_state_correction
-        thermal_correction_enthalpy = None
-        gibbs_correction = None
-        gibbs_free_energy = None
+    zpe_thermo = _thermo_value(
+        ("zpe", "ZPE", "zpve", "ZPVE", "zero_point_energy", "zero_point_energy_hartree")
+    )
+    enthalpy_total = _thermo_value(("H", "enthalpy"))
+    gibbs_total = _thermo_value(("G", "gibbs"))
+    entropy = _thermo_value(("S", "entropy"))
+    zpe_for_thermo = _to_scalar(zpe_thermo) if zpe_thermo is not None else zpe_value
+    enthalpy_total_value = _to_scalar(enthalpy_total)
+    gibbs_total_value = _to_scalar(gibbs_total)
+    entropy_value = _to_scalar(entropy)
+    dispersion_energy_hartree = (
+        dispersion_info.get("energy_hartree") if dispersion_info else None
+    )
+    if dispersion_energy_hartree is not None:
         if enthalpy_total_value is not None:
-            thermal_correction_enthalpy = enthalpy_total_value - energy
+            enthalpy_total_value += dispersion_energy_hartree
         if gibbs_total_value is not None:
-            gibbs_correction = gibbs_total_value - energy
-            gibbs_free_energy = energy + gibbs_correction
-        thermochemistry = {
-            "temperature": _to_scalar(temperature),
-            "pressure": _to_scalar(pressure),
-            "pressure_unit": pressure_unit,
-            "zpe": zpe_for_thermo,
-            "thermal_correction_enthalpy": _to_scalar(thermal_correction_enthalpy),
-            "entropy": entropy_value,
-            "gibbs_correction": _to_scalar(gibbs_correction),
-            "gibbs_free_energy": _to_scalar(gibbs_free_energy),
-            "standard_state": standard_state,
-            "standard_state_correction": _to_scalar(standard_state_correction),
-        }
+            gibbs_total_value += dispersion_energy_hartree
+
+    standard_state = None
+    standard_state_correction = None
+    if solvent_model and solvent_name and str(solvent_name).strip().lower() != "vacuum":
+        temperature_value = None
+        pressure_value_pa = None
+        temp_entry = thermo_result.get("temperature") if thermo_result else None
+        if isinstance(temp_entry, (list, tuple)) and temp_entry:
+            temperature_value = _to_scalar(temp_entry[0])
+        elif temp_entry is not None:
+            temperature_value = _to_scalar(temp_entry)
+        if temperature_value is None and temperature is not None:
+            temperature_value = _to_scalar(temperature)
+        pressure_entry = thermo_result.get("pressure") if thermo_result else None
+        if isinstance(pressure_entry, (list, tuple)) and pressure_entry:
+            pressure_value_pa = _to_scalar(pressure_entry[0])
+        elif pressure_entry is not None:
+            pressure_value_pa = _to_scalar(pressure_entry)
+        if pressure_value_pa is None and pressure is not None:
+            unit = str(pressure_unit or "pa").strip().lower()
+            if unit in ("atm", "atmosphere", "atmospheres"):
+                pressure_value_pa = float(pressure) * 101325.0
+            elif unit in ("bar", "bars"):
+                pressure_value_pa = float(pressure) * 100000.0
+            elif unit in ("kpa",):
+                pressure_value_pa = float(pressure) * 1000.0
+            elif unit in ("mpa",):
+                pressure_value_pa = float(pressure) * 1_000_000.0
+            elif unit in ("torr", "mmhg"):
+                pressure_value_pa = float(pressure) * 133.322368
+            else:
+                pressure_value_pa = float(pressure)
+        if temperature_value and pressure_value_pa:
+            ratio = (
+                1000.0
+                * nist.AVOGADRO
+                * nist.BOLTZMANN
+                * float(temperature_value)
+                / float(pressure_value_pa)
+            )
+            if ratio > 0:
+                standard_state_correction = (
+                    nist.BOLTZMANN
+                    * float(temperature_value)
+                    * math.log(ratio)
+                    / nist.HARTREE2J
+                )
+                standard_state = "1M"
+                if gibbs_total_value is not None:
+                    gibbs_total_value += standard_state_correction
+
+    thermal_correction_enthalpy = None
+    gibbs_correction = None
+    gibbs_free_energy = None
+    if enthalpy_total_value is not None:
+        thermal_correction_enthalpy = enthalpy_total_value - energy
+    if gibbs_total_value is not None:
+        gibbs_correction = gibbs_total_value - energy
+        gibbs_free_energy = energy + gibbs_correction
+
+    return {
+        "temperature": _to_scalar(temperature),
+        "pressure": _to_scalar(pressure),
+        "pressure_unit": pressure_unit,
+        "zpe": zpe_for_thermo,
+        "thermal_correction_enthalpy": _to_scalar(thermal_correction_enthalpy),
+        "entropy": entropy_value,
+        "gibbs_correction": _to_scalar(gibbs_correction),
+        "gibbs_free_energy": _to_scalar(gibbs_free_energy),
+        "standard_state": standard_state,
+        "standard_state_correction": _to_scalar(standard_state_correction),
+    }
+
+
+def _summarize_imaginary_frequencies(freq_wavenumber_list):
     imaginary_count = None
     imaginary_status = None
     imaginary_message = None
@@ -1527,8 +1315,27 @@ def compute_frequencies(
     else:
         imaginary_status = "unknown"
         imaginary_message = "No frequency data available to assess imaginary modes."
+    return {
+        "imaginary_count": imaginary_count,
+        "imaginary_status": imaginary_status,
+        "imaginary_message": imaginary_message,
+        "min_frequency": min_frequency,
+        "max_frequency": max_frequency,
+        "imaginary_frequencies": imaginary_frequencies,
+    }
 
-    ts_quality_payload = None
+
+def _build_ts_quality_payload(
+    *,
+    ts_quality,
+    optimizer_mode,
+    imaginary_frequencies,
+    imaginary_count,
+    hess,
+    mol_freq,
+    atomic_masses,
+    atomic_numbers,
+):
     ts_quality_settings = {}
     if ts_quality is not None:
         if hasattr(ts_quality, "to_dict"):
@@ -1548,116 +1355,372 @@ def compute_frequencies(
     projection_step = ts_quality_settings.get("projection_step") or DEFAULT_TS_MODE_PROJECTION_STEP
     projection_min_abs = ts_quality_settings.get("projection_min_abs") or 0.0
     internal_coordinates = ts_quality_settings.get("internal_coordinates") or []
-    if (
+    if not (
         expected_imaginary_count is not None
         or min_abs is not None
         or max_abs is not None
         or internal_coordinates
         or optimizer_mode == "transition_state"
     ):
-        imaginary_abs = None
-        imaginary_value = None
-        if imaginary_frequencies:
-            imaginary_value = min(imaginary_frequencies)
-            imaginary_abs = abs(imaginary_value)
-        count_ok = None
-        if expected_imaginary_count is not None and imaginary_count is not None:
-            count_ok = imaginary_count == expected_imaginary_count
-        range_status = "unknown"
-        range_message = None
-        if imaginary_abs is not None and (min_abs is not None or max_abs is not None):
-            if min_abs is not None and imaginary_abs < min_abs:
-                range_status = "too_small"
-                range_message = (
-                    f"Imaginary frequency magnitude {imaginary_abs:.2f} cm^-1 "
-                    f"is below the minimum {min_abs:.2f} cm^-1."
-                )
-            elif max_abs is not None and imaginary_abs > max_abs:
-                range_status = "too_large"
-                range_message = (
-                    f"Imaginary frequency magnitude {imaginary_abs:.2f} cm^-1 "
-                    f"exceeds the maximum {max_abs:.2f} cm^-1."
-                )
-            else:
-                range_status = "ok"
-        alignment_result = {
-            "status": "not_configured",
-            "projection_step": projection_step,
-            "projection_min_abs": projection_min_abs,
-            "coordinates": [],
-        }
-        mode_result = None
-        alignment_error = None
-        if internal_coordinates:
-            try:
-                mode_result = _extract_imaginary_mode_from_hessian(
-                    hess, mol_freq, atomic_masses, atomic_numbers
-                )
-                alignment_result = _project_imaginary_mode_to_internal_coordinates(
-                    positions=mol_freq.atom_coords(unit="Angstrom"),
-                    mode=mode_result["mode"],
-                    internal_coordinates=internal_coordinates,
-                    projection_step=projection_step,
-                    projection_min_abs=projection_min_abs,
-                )
-            except Exception as exc:
-                alignment_error = str(exc)
-                alignment_result = {
-                    "status": "unknown",
-                    "projection_step": projection_step,
-                    "projection_min_abs": projection_min_abs,
-                    "coordinates": [],
-                    "error": alignment_error,
-                }
-        status = "pass"
-        messages = []
-        if count_ok is False:
-            status = "fail"
-            messages.append(
-                "Imaginary frequency count does not match expected "
-                f"{expected_imaginary_count}."
-            )
-        if alignment_result.get("status") == "misaligned":
-            status = "fail"
-            messages.append("Imaginary mode is misaligned with target coordinates.")
-        if range_status in ("too_small", "too_large"):
-            if status != "fail":
-                status = "warn"
-            if range_message:
-                messages.append(range_message)
-        if alignment_result.get("status") in ("weak", "unknown"):
-            if status == "pass":
-                status = "warn"
-            if alignment_result.get("status") == "weak":
-                messages.append("Imaginary mode projection is weak for target coordinates.")
-            else:
-                messages.append("Imaginary mode alignment could not be determined.")
-        if status == "pass" and not messages:
-            messages.append("Transition-state quality checks passed.")
-        allow_irc = None
-        allow_single_point = None
-        if optimizer_mode == "transition_state":
-            allow_irc = status in ("pass", "warn")
-            allow_single_point = allow_irc
-        ts_quality_payload = {
-            "status": status,
-            "message": " ".join(messages) if messages else None,
-            "expected_imaginary_count": expected_imaginary_count,
-            "imaginary_count": imaginary_count,
-            "imaginary_count_ok": count_ok,
-            "imaginary_frequency": imaginary_value,
-            "imaginary_frequency_abs": imaginary_abs,
-            "imaginary_frequency_range": {
-                "min_abs": min_abs,
-                "max_abs": max_abs,
-                "status": range_status,
-                "message": range_message,
-            },
-            "internal_coordinate_alignment": alignment_result,
-            "allow_irc": allow_irc,
-            "allow_single_point": allow_single_point,
-        }
+        return None
 
+    imaginary_abs = None
+    imaginary_value = None
+    if imaginary_frequencies:
+        imaginary_value = min(imaginary_frequencies)
+        imaginary_abs = abs(imaginary_value)
+    count_ok = None
+    if expected_imaginary_count is not None and imaginary_count is not None:
+        count_ok = imaginary_count == expected_imaginary_count
+    range_status = "unknown"
+    range_message = None
+    if imaginary_abs is not None and (min_abs is not None or max_abs is not None):
+        if min_abs is not None and imaginary_abs < min_abs:
+            range_status = "too_small"
+            range_message = (
+                f"Imaginary frequency magnitude {imaginary_abs:.2f} cm^-1 "
+                f"is below the minimum {min_abs:.2f} cm^-1."
+            )
+        elif max_abs is not None and imaginary_abs > max_abs:
+            range_status = "too_large"
+            range_message = (
+                f"Imaginary frequency magnitude {imaginary_abs:.2f} cm^-1 "
+                f"exceeds the maximum {max_abs:.2f} cm^-1."
+            )
+        else:
+            range_status = "ok"
+    alignment_result = {
+        "status": "not_configured",
+        "projection_step": projection_step,
+        "projection_min_abs": projection_min_abs,
+        "coordinates": [],
+    }
+    if internal_coordinates:
+        try:
+            mode_result = _extract_imaginary_mode_from_hessian(
+                hess, mol_freq, atomic_masses, atomic_numbers
+            )
+            alignment_result = _project_imaginary_mode_to_internal_coordinates(
+                positions=mol_freq.atom_coords(unit="Angstrom"),
+                mode=mode_result["mode"],
+                internal_coordinates=internal_coordinates,
+                projection_step=projection_step,
+                projection_min_abs=projection_min_abs,
+            )
+        except Exception as exc:
+            alignment_result = {
+                "status": "unknown",
+                "projection_step": projection_step,
+                "projection_min_abs": projection_min_abs,
+                "coordinates": [],
+                "error": str(exc),
+            }
+    status = "pass"
+    messages = []
+    if count_ok is False:
+        status = "fail"
+        messages.append(
+            "Imaginary frequency count does not match expected "
+            f"{expected_imaginary_count}."
+        )
+    if alignment_result.get("status") == "misaligned":
+        status = "fail"
+        messages.append("Imaginary mode is misaligned with target coordinates.")
+    if range_status in ("too_small", "too_large"):
+        if status != "fail":
+            status = "warn"
+        if range_message:
+            messages.append(range_message)
+    if alignment_result.get("status") in ("weak", "unknown"):
+        if status == "pass":
+            status = "warn"
+        if alignment_result.get("status") == "weak":
+            messages.append("Imaginary mode projection is weak for target coordinates.")
+        else:
+            messages.append("Imaginary mode alignment could not be determined.")
+    if status == "pass" and not messages:
+        messages.append("Transition-state quality checks passed.")
+    allow_irc = None
+    allow_single_point = None
+    if optimizer_mode == "transition_state":
+        allow_irc = status in ("pass", "warn")
+        allow_single_point = allow_irc
+    return {
+        "status": status,
+        "message": " ".join(messages) if messages else None,
+        "expected_imaginary_count": expected_imaginary_count,
+        "imaginary_count": imaginary_count,
+        "imaginary_count_ok": count_ok,
+        "imaginary_frequency": imaginary_value,
+        "imaginary_frequency_abs": imaginary_abs,
+        "imaginary_frequency_range": {
+            "min_abs": min_abs,
+            "max_abs": max_abs,
+            "status": range_status,
+            "message": range_message,
+        },
+        "internal_coordinate_alignment": alignment_result,
+        "allow_irc": allow_irc,
+        "allow_single_point": allow_single_point,
+    }
+
+
+def _init_frequency_profiling(profiling_enabled):
+    if not profiling_enabled:
+        return None
+    return {
+        "scf_seconds": None,
+        "scf_cycles": None,
+        "hessian_seconds": None,
+        "dispersion_hessian_seconds": None,
+    }
+
+
+def _prepare_frequency_molecule(mol, basis, memory_mb):
+    mol_freq = mol.copy()
+    if basis:
+        mol_freq.basis = basis
+        mol_freq.build()
+    if memory_mb:
+        mol_freq.max_memory = memory_mb
+    return mol_freq
+
+
+def _build_frequency_mf(
+    *,
+    mol_freq,
+    dft_module,
+    xc,
+    scf_settings,
+    solvent_model,
+    solvent_name,
+    solvent_eps,
+    apply_density_fit,
+    verbose,
+    optimizer_mode,
+    multiplicity,
+    log_override,
+):
+    ks_type = select_ks_type(
+        mol=mol_freq,
+        scf_config=scf_settings,
+        optimizer_mode=optimizer_mode,
+        multiplicity=multiplicity,
+        log_override=log_override,
+    )
+    if ks_type == "RKS":
+        mf_freq = dft_module.RKS(mol_freq)
+    else:
+        mf_freq = dft_module.UKS(mol_freq)
+    mf_freq.xc = xc
+    density_fit_applied = False
+    if apply_density_fit:
+        mf_freq, df_config = apply_density_fit_setting(mf_freq, scf_settings)
+        density_fit_applied = bool(df_config.get("density_fit"))
+    if solvent_model is not None:
+        mf_freq = apply_solvent_model(
+            mf_freq,
+            solvent_model,
+            solvent_name,
+            solvent_eps,
+        )
+    if verbose:
+        mf_freq.verbose = 4
+    mf_freq, _ = apply_scf_settings(mf_freq, scf_settings, apply_density_fit=False)
+    return mf_freq, {"density_fit_applied": density_fit_applied}
+
+
+def _run_frequency_scf(
+    *,
+    mol_freq,
+    dft_module,
+    xc,
+    scf_config,
+    solvent_model,
+    solvent_name,
+    solvent_eps,
+    apply_density_fit,
+    verbose,
+    optimizer_mode,
+    multiplicity,
+    log_override,
+    run_dir,
+    label,
+    profiling,
+):
+    scf_start = time.perf_counter() if profiling else None
+    energy, mf_freq, info = _run_scf_with_retries(
+        lambda scf_settings: _build_frequency_mf(
+            mol_freq=mol_freq,
+            dft_module=dft_module,
+            xc=xc,
+            scf_settings=scf_settings,
+            solvent_model=solvent_model,
+            solvent_name=solvent_name,
+            solvent_eps=solvent_eps,
+            apply_density_fit=apply_density_fit,
+            verbose=verbose,
+            optimizer_mode=optimizer_mode,
+            multiplicity=multiplicity,
+            log_override=log_override,
+        ),
+        scf_config,
+        run_dir,
+        label,
+    )
+    if scf_start is not None:
+        elapsed = time.perf_counter() - scf_start
+        profiling["scf_seconds"] = (profiling["scf_seconds"] or 0.0) + elapsed
+        cycles = extract_step_count(mf_freq)
+        if cycles is not None:
+            profiling["scf_cycles"] = (profiling["scf_cycles"] or 0) + cycles
+    return energy, mf_freq, info
+
+
+def _compute_hessian_with_timing(mf_handle, pyscf_hessian, profiling):
+    hess_start = time.perf_counter() if profiling else None
+    if hasattr(mf_handle, "Hessian"):
+        hess_value = mf_handle.Hessian().kernel()
+    else:
+        hess_value = pyscf_hessian.Hessian(mf_handle).kernel()
+    hess_seconds = None
+    if hess_start is not None:
+        hess_seconds = time.perf_counter() - hess_start
+    return hess_value, hess_seconds
+
+
+def _run_frequency_hessian_with_retry(
+    *,
+    energy,
+    mf_freq,
+    scf_info,
+    dispersion_payload,
+    mol_freq,
+    dft_module,
+    pyscf_hessian,
+    xc,
+    scf_config,
+    solvent_model,
+    solvent_name,
+    solvent_eps,
+    verbose,
+    optimizer_mode,
+    multiplicity,
+    log_override,
+    run_dir,
+    profiling,
+):
+    density_fit_applied = bool(scf_info.get("density_fit_applied"))
+    energy, dispersion_info, dispersion_hessian = _apply_dispersion_payload(
+        energy, dispersion_payload
+    )
+    try:
+        hess, hess_seconds = _compute_hessian_with_timing(
+            mf_freq, pyscf_hessian, profiling
+        )
+    except Exception as exc:
+        if not (
+            density_fit_applied and is_density_fit_gradient_einsum_error(exc)
+        ):
+            raise
+        logging.warning(
+            "Density-fitting Hessian failed; retrying without density fitting."
+        )
+        energy, mf_freq, retry_info = _run_frequency_scf(
+            mol_freq=mol_freq,
+            dft_module=dft_module,
+            xc=xc,
+            scf_config=scf_config,
+            solvent_model=solvent_model,
+            solvent_name=solvent_name,
+            solvent_eps=solvent_eps,
+            apply_density_fit=False,
+            verbose=verbose,
+            optimizer_mode=optimizer_mode,
+            multiplicity=multiplicity,
+            log_override=log_override,
+            run_dir=run_dir,
+            label="Frequency SCF (no density fit)",
+            profiling=profiling,
+        )
+        density_fit_applied = bool(retry_info.get("density_fit_applied"))
+        energy, dispersion_info, dispersion_hessian = _apply_dispersion_payload(
+            energy, dispersion_payload
+        )
+        hess, hess_seconds = _compute_hessian_with_timing(
+            mf_freq, pyscf_hessian, profiling
+        )
+    if hess_seconds is not None and profiling is not None:
+        profiling["hessian_seconds"] = (
+            (profiling["hessian_seconds"] or 0.0) + hess_seconds
+        )
+    return energy, mf_freq, dispersion_info, dispersion_hessian, hess
+
+
+def _project_frequency_constraints(*, hess, mol_freq, atoms, atoms_cls, constraints):
+    if not constraints:
+        return hess, None, atoms
+    constraint_projection = {
+        "requested": True,
+        "projected": False,
+        "count": 0,
+        "error": None,
+    }
+    try:
+        if atoms is None:
+            atoms = _atoms_from_molecule(mol_freq, atoms_cls)
+        jacobians = _collect_constraint_jacobians(atoms, constraints)
+        if jacobians is None:
+            constraint_projection["error"] = "no_constraints"
+        else:
+            constraint_projection["count"] = jacobians.shape[0]
+            hess = _project_hessian_constraints(hess, mol_freq, jacobians)
+            constraint_projection["projected"] = True
+            logging.info(
+                "Applied constraint-projected Hessian (%s constraints).",
+                constraint_projection["count"],
+            )
+    except Exception as exc:
+        constraint_projection["error"] = str(exc)
+        logging.warning("Constraint-projected Hessian skipped: %s", exc)
+    return hess, constraint_projection, atoms
+
+
+def _extract_harmonic_terms(harmonic):
+    freq_wavenumber = None
+    freq_au = None
+    zpe = None
+    if harmonic:
+        freq_wavenumber = harmonic.get("freq_wavenumber")
+        freq_au = harmonic.get("freq_au")
+        for key in (
+            "zpe",
+            "ZPE",
+            "zero_point_energy",
+            "zero_point_energy_hartree",
+            "zpve",
+            "ZPVE",
+        ):
+            if key in harmonic:
+                zpe = harmonic.get(key)
+                break
+    return freq_wavenumber, freq_au, zpe
+
+
+def _build_frequency_result_payload(
+    *,
+    energy,
+    mf_freq,
+    freq_wavenumber_list,
+    freq_au_list,
+    zpe_value,
+    imaginary_summary,
+    ts_quality_payload,
+    dispersion_info,
+    thermochemistry,
+    constraint_projection,
+    profiling,
+):
     result = {
         "energy": energy,
         "converged": getattr(mf_freq, "converged", None),
@@ -1665,13 +1728,13 @@ def compute_frequencies(
         "frequencies_wavenumber": freq_wavenumber_list,
         "frequencies_au": freq_au_list,
         "zpe": zpe_value,
-        "imaginary_count": imaginary_count,
+        "imaginary_count": imaginary_summary["imaginary_count"],
         "imaginary_check": {
-            "status": imaginary_status,
-            "message": imaginary_message,
+            "status": imaginary_summary["imaginary_status"],
+            "message": imaginary_summary["imaginary_message"],
         },
-        "min_frequency": min_frequency,
-        "max_frequency": max_frequency,
+        "min_frequency": imaginary_summary["min_frequency"],
+        "max_frequency": imaginary_summary["max_frequency"],
         "ts_quality": ts_quality_payload,
         "dispersion": dispersion_info,
         "thermochemistry": thermochemistry,
@@ -1680,6 +1743,460 @@ def compute_frequencies(
     if profiling:
         result["profiling"] = profiling
     return result
+
+
+def compute_frequencies(
+    mol,
+    basis,
+    xc,
+    scf_config,
+    solvent_model,
+    solvent_name,
+    solvent_eps,
+    dispersion,
+    dispersion_hessian_mode,
+    dispersion_hessian_step,
+    dispersion_params,
+    thermo,
+    verbose,
+    memory_mb,
+    constraints,
+    run_dir=None,
+    optimizer_mode=None,
+    multiplicity=None,
+    ts_quality=None,
+    profiling_enabled=False,
+    log_override=True,
+):
+    from ase import units
+    from ase import Atoms
+    from ase.data import atomic_masses, atomic_numbers
+    from pyscf import dft, hessian as pyscf_hessian
+    from pyscf.data import nist
+    from pyscf.hessian import thermo as pyscf_thermo
+
+    xc = normalize_xc_functional(xc)
+    profiling = _init_frequency_profiling(profiling_enabled)
+    if dispersion_hessian_mode == "none":
+        dispersion = None
+    mol_freq = _prepare_frequency_molecule(mol, basis, memory_mb)
+
+    atoms = None
+    if dispersion is not None or constraints:
+        atoms = _atoms_from_molecule(mol_freq, Atoms)
+    dispersion_payload, atoms = _prepare_frequency_dispersion_payload(
+        mol_freq=mol_freq,
+        atoms=atoms,
+        atoms_cls=Atoms,
+        dispersion=dispersion,
+        xc=xc,
+        dispersion_hessian_mode=dispersion_hessian_mode,
+        dispersion_hessian_step=dispersion_hessian_step,
+        dispersion_params=dispersion_params,
+        profiling=profiling,
+        units=units,
+    )
+
+    energy, mf_freq, scf_info = _run_frequency_scf(
+        mol_freq=mol_freq,
+        dft_module=dft,
+        xc=xc,
+        scf_config=scf_config,
+        solvent_model=solvent_model,
+        solvent_name=solvent_name,
+        solvent_eps=solvent_eps,
+        apply_density_fit=True,
+        verbose=verbose,
+        optimizer_mode=optimizer_mode,
+        multiplicity=multiplicity,
+        log_override=log_override,
+        run_dir=run_dir,
+        label="Frequency SCF",
+        profiling=profiling,
+    )
+    energy, mf_freq, dispersion_info, dispersion_hessian, hess = (
+        _run_frequency_hessian_with_retry(
+            energy=energy,
+            mf_freq=mf_freq,
+            scf_info=scf_info,
+            dispersion_payload=dispersion_payload,
+            mol_freq=mol_freq,
+            dft_module=dft,
+            pyscf_hessian=pyscf_hessian,
+            xc=xc,
+            scf_config=scf_config,
+            solvent_model=solvent_model,
+            solvent_name=solvent_name,
+            solvent_eps=solvent_eps,
+            verbose=verbose,
+            optimizer_mode=optimizer_mode,
+            multiplicity=multiplicity,
+            log_override=log_override,
+            run_dir=run_dir,
+            profiling=profiling,
+        )
+    )
+    if dispersion_hessian is not None:
+        hess = hess + dispersion_hessian
+    hess, constraint_projection, atoms = _project_frequency_constraints(
+        hess=hess,
+        mol_freq=mol_freq,
+        atoms=atoms,
+        atoms_cls=Atoms,
+        constraints=constraints,
+    )
+    harmonic = pyscf_thermo.harmonic_analysis(mol_freq, hess, imaginary_freq=False)
+    freq_wavenumber, freq_au, zpe = _extract_harmonic_terms(harmonic)
+    freq_wavenumber_list = _to_list(freq_wavenumber)
+    freq_au_list = _to_list(freq_au)
+    zpe_value = _to_scalar(zpe)
+    thermochemistry = _build_thermochemistry_payload(
+        mf_freq=mf_freq,
+        freq_au=freq_au,
+        thermo=thermo,
+        zpe_value=zpe_value,
+        energy=energy,
+        dispersion_info=dispersion_info,
+        solvent_model=solvent_model,
+        solvent_name=solvent_name,
+        nist=nist,
+        pyscf_thermo=pyscf_thermo,
+    )
+    imaginary_summary = _summarize_imaginary_frequencies(freq_wavenumber_list)
+    ts_quality_payload = _build_ts_quality_payload(
+        ts_quality=ts_quality,
+        optimizer_mode=optimizer_mode,
+        imaginary_frequencies=imaginary_summary["imaginary_frequencies"],
+        imaginary_count=imaginary_summary["imaginary_count"],
+        hess=hess,
+        mol_freq=mol_freq,
+        atomic_masses=atomic_masses,
+        atomic_numbers=atomic_numbers,
+    )
+    return _build_frequency_result_payload(
+        energy=energy,
+        mf_freq=mf_freq,
+        freq_wavenumber_list=freq_wavenumber_list,
+        freq_au_list=freq_au_list,
+        zpe_value=zpe_value,
+        imaginary_summary=imaginary_summary,
+        ts_quality_payload=ts_quality_payload,
+        dispersion_info=dispersion_info,
+        thermochemistry=thermochemistry,
+        constraint_projection=constraint_projection,
+        profiling=profiling,
+    )
+
+
+def _init_imaginary_mode_profiling(profiling_enabled):
+    if not profiling_enabled:
+        return None
+    return {
+        "scf_seconds": None,
+        "scf_cycles": None,
+        "hessian_seconds": None,
+    }
+
+
+def _prepare_imaginary_mode_molecule(mol, basis, memory_mb):
+    mol_mode = mol.copy()
+    if basis:
+        mol_mode.basis = basis
+        mol_mode.build()
+    if memory_mb:
+        mol_mode.max_memory = memory_mb
+    return mol_mode
+
+
+def _build_imaginary_mode_mf(
+    *,
+    mol_mode,
+    dft_module,
+    xc,
+    scf_config,
+    solvent_model,
+    solvent_name,
+    solvent_eps,
+    apply_density_fit,
+    verbose,
+    ks_type,
+):
+    if ks_type == "RKS":
+        mf_mode = dft_module.RKS(mol_mode)
+    else:
+        mf_mode = dft_module.UKS(mol_mode)
+    mf_mode.xc = xc
+    density_fit_applied = False
+    if apply_density_fit:
+        mf_mode, df_config = apply_density_fit_setting(mf_mode, scf_config)
+        density_fit_applied = bool(df_config.get("density_fit"))
+    if solvent_model is not None:
+        mf_mode = apply_solvent_model(
+            mf_mode,
+            solvent_model,
+            solvent_name,
+            solvent_eps,
+        )
+    if verbose:
+        mf_mode.verbose = 4
+    mf_mode, _ = apply_scf_settings(mf_mode, scf_config, apply_density_fit=False)
+    return mf_mode, density_fit_applied
+
+
+def _run_imaginary_mode_scf(mf_mode, scf_config, run_dir, profiling):
+    scf_start = time.perf_counter() if profiling else None
+    dm0, _ = apply_scf_checkpoint(mf_mode, scf_config, run_dir=run_dir)
+    if dm0 is not None:
+        mf_mode.kernel(dm0=dm0)
+    else:
+        mf_mode.kernel()
+    if scf_start is not None:
+        profiling["scf_seconds"] = (profiling["scf_seconds"] or 0.0) + (
+            time.perf_counter() - scf_start
+        )
+        cycles = extract_step_count(mf_mode)
+        if cycles is not None:
+            profiling["scf_cycles"] = (profiling["scf_cycles"] or 0) + cycles
+
+
+def _compute_imaginary_mode_hessian(mf_mode, pyscf_hessian, profiling):
+    hess, hess_seconds = _compute_hessian_with_timing(mf_mode, pyscf_hessian, profiling)
+    if hess_seconds is not None and profiling is not None:
+        profiling["hessian_seconds"] = (profiling["hessian_seconds"] or 0.0) + hess_seconds
+    return hess
+
+
+def _run_imaginary_mode_hessian_with_retry(
+    *,
+    mol_mode,
+    dft_module,
+    pyscf_hessian,
+    xc,
+    scf_config,
+    solvent_model,
+    solvent_name,
+    solvent_eps,
+    verbose,
+    ks_type,
+    run_dir,
+    profiling,
+):
+    mf_mode, density_fit_applied = _build_imaginary_mode_mf(
+        mol_mode=mol_mode,
+        dft_module=dft_module,
+        xc=xc,
+        scf_config=scf_config,
+        solvent_model=solvent_model,
+        solvent_name=solvent_name,
+        solvent_eps=solvent_eps,
+        apply_density_fit=True,
+        verbose=verbose,
+        ks_type=ks_type,
+    )
+    _run_imaginary_mode_scf(mf_mode, scf_config, run_dir, profiling)
+    try:
+        return _compute_imaginary_mode_hessian(mf_mode, pyscf_hessian, profiling)
+    except Exception as exc:
+        if not (density_fit_applied and is_density_fit_gradient_einsum_error(exc)):
+            raise
+        logging.warning(
+            "Density-fitting Hessian failed; retrying without density fitting."
+        )
+        mf_mode, _ = _build_imaginary_mode_mf(
+            mol_mode=mol_mode,
+            dft_module=dft_module,
+            xc=xc,
+            scf_config=scf_config,
+            solvent_model=solvent_model,
+            solvent_name=solvent_name,
+            solvent_eps=solvent_eps,
+            apply_density_fit=False,
+            verbose=verbose,
+            ks_type=ks_type,
+        )
+        _run_imaginary_mode_scf(mf_mode, scf_config, run_dir, profiling)
+        return _compute_imaginary_mode_hessian(mf_mode, pyscf_hessian, profiling)
+
+
+def _compute_imaginary_mode_dispersion_hessian(
+    *,
+    mol_mode,
+    atoms_cls,
+    units_module,
+    dispersion,
+    xc,
+    dispersion_hessian_step,
+    dispersion_params,
+):
+    atoms = _atoms_from_molecule(mol_mode, atoms_cls)
+    dispersion_settings = parse_dispersion_settings(
+        dispersion,
+        xc,
+        charge=mol_mode.charge,
+        spin=mol_mode.spin,
+        d3_params=dispersion_params,
+    )
+    dispersion_calc, _dispersion_backend = _build_dispersion_calculator(
+        atoms, dispersion_settings
+    )
+    atoms.calc = dispersion_calc
+    step = dispersion_hessian_step if dispersion_hessian_step is not None else 0.005
+    dispersion_hessian = _compute_dispersion_hessian_numerical(atoms, step)
+    return dispersion_hessian * ((1.0 / units_module.Hartree) / (units_module.Bohr ** 2))
+
+
+def _apply_imaginary_mode_constraints(hess, mol_mode, atoms_cls, constraints):
+    if not constraints:
+        return hess
+    atoms = _atoms_from_molecule(mol_mode, atoms_cls)
+    jacobians = _collect_constraint_jacobians(atoms, constraints)
+    if jacobians is not None:
+        hess = _project_hessian_constraints(hess, mol_mode, jacobians)
+    return hess
+
+
+def _finalize_imaginary_mode_result(result, *, hess, profiling, return_hessian):
+    if return_hessian:
+        result["hessian"] = hess
+    if profiling:
+        result["profiling"] = profiling
+    return result
+
+
+_CAPABILITY_SCF_ERROR = (
+    "Capability check failed during SCF. "
+    "The current XC/solvent/spin combination may be unsupported. "
+    "Review the SCF setup or choose a different solvent model."
+)
+_CAPABILITY_GRAD_ERROR = (
+    "Capability check failed during nuclear gradient evaluation. "
+    "The current XC/solvent/spin combination may not support gradients. "
+    "Adjust the solvent model or use a PySCF build with gradient support."
+)
+_CAPABILITY_HESS_ERROR = (
+    "Capability check failed during Hessian evaluation. "
+    "The current XC/solvent/spin combination may not support Hessians. "
+    "Disable frequency calculations or use a compatible PySCF build."
+)
+
+
+def _prepare_capability_check_molecule(mol, basis, memory_mb):
+    mol_check = mol.copy()
+    if basis:
+        mol_check.basis = basis
+        mol_check.build()
+    if memory_mb:
+        mol_check.max_memory = memory_mb
+    return mol_check
+
+
+def _validate_capability_dispersion(mol_check, dispersion, xc, dispersion_params):
+    if dispersion is None:
+        return
+    parse_dispersion_settings(
+        dispersion,
+        normalize_xc_functional(xc),
+        charge=mol_check.charge,
+        spin=mol_check.spin,
+        d3_params=dispersion_params,
+    )
+
+
+def _prepare_capability_scf_override(scf_config, max_scf_cycles):
+    scf_override = dict(scf_config or {})
+    current_max = scf_override.get("max_cycle", max_scf_cycles)
+    scf_override["max_cycle"] = min(current_max, max_scf_cycles)
+    return scf_override
+
+
+def _build_capability_check_mf(
+    *,
+    mol_check,
+    dft_module,
+    ks_type,
+    xc,
+    scf_config,
+    scf_override,
+    solvent_model,
+    solvent_name,
+    solvent_eps,
+    verbose,
+    apply_density_fit,
+):
+    if ks_type == "RKS":
+        mf_check = dft_module.RKS(mol_check)
+    else:
+        mf_check = dft_module.UKS(mol_check)
+    mf_check.xc = normalize_xc_functional(xc)
+    density_fit_applied = False
+    if apply_density_fit:
+        mf_check, df_config = apply_density_fit_setting(mf_check, scf_config)
+        density_fit_applied = bool(df_config.get("density_fit"))
+    if solvent_model is not None:
+        mf_check = apply_solvent_model(
+            mf_check,
+            solvent_model,
+            solvent_name,
+            solvent_eps,
+        )
+    if verbose:
+        mf_check.verbose = 4
+    mf_check, _ = apply_scf_settings(mf_check, scf_override, apply_density_fit=False)
+    return mf_check, density_fit_applied
+
+
+def _run_capability_scf_or_raise(mf_check):
+    try:
+        mf_check.kernel()
+    except Exception as exc:
+        raise RuntimeError(_CAPABILITY_SCF_ERROR) from exc
+
+
+def _run_capability_gradient(mf_check):
+    mf_check.nuc_grad_method().kernel()
+
+
+def _run_capability_hessian(mf_check, pyscf_hessian):
+    if hasattr(mf_check, "Hessian"):
+        mf_check.Hessian().kernel()
+    else:
+        pyscf_hessian.Hessian(mf_check).kernel()
+
+
+def _run_capability_gradient_with_retry(
+    *, mf_check, density_fit_applied, build_mf_check
+):
+    try:
+        _run_capability_gradient(mf_check)
+    except Exception as exc:
+        if density_fit_applied and is_density_fit_gradient_einsum_error(exc):
+            try:
+                mf_check, _ = build_mf_check(apply_density_fit=False)
+                _run_capability_scf_or_raise(mf_check)
+                _run_capability_gradient(mf_check)
+                return mf_check, False
+            except Exception as retry_exc:
+                raise RuntimeError(_CAPABILITY_GRAD_ERROR) from retry_exc
+        raise RuntimeError(_CAPABILITY_GRAD_ERROR) from exc
+    return mf_check, density_fit_applied
+
+
+def _run_capability_hessian_with_retry(
+    *, mf_check, density_fit_applied, build_mf_check, pyscf_hessian
+):
+    try:
+        _run_capability_hessian(mf_check, pyscf_hessian)
+    except Exception as exc:
+        if density_fit_applied and is_density_fit_gradient_einsum_error(exc):
+            try:
+                mf_check, _ = build_mf_check(apply_density_fit=False)
+                _run_capability_scf_or_raise(mf_check)
+                _run_capability_hessian(mf_check, pyscf_hessian)
+                return mf_check, False
+            except Exception as retry_exc:
+                raise RuntimeError(_CAPABILITY_HESS_ERROR) from retry_exc
+        raise RuntimeError(_CAPABILITY_HESS_ERROR) from exc
+    return mf_check, density_fit_applied
 
 
 def compute_imaginary_mode(
@@ -1710,23 +2227,11 @@ def compute_imaginary_mode(
         raise ImportError(
             "IRC mode extraction requires ASE (ase.data). Install ASE to proceed."
         ) from exc
-    import numpy as np
     from pyscf import dft, hessian as pyscf_hessian
 
     xc = normalize_xc_functional(xc)
-    profiling = None
-    if profiling_enabled:
-        profiling = {
-            "scf_seconds": None,
-            "scf_cycles": None,
-            "hessian_seconds": None,
-        }
-    mol_mode = mol.copy()
-    if basis:
-        mol_mode.basis = basis
-        mol_mode.build()
-    if memory_mb:
-        mol_mode.max_memory = memory_mb
+    profiling = _init_imaginary_mode_profiling(profiling_enabled)
+    mol_mode = _prepare_imaginary_mode_molecule(mol, basis, memory_mb)
     ks_type = select_ks_type(
         mol=mol_mode,
         scf_config=scf_config,
@@ -1734,141 +2239,43 @@ def compute_imaginary_mode(
         multiplicity=multiplicity,
         log_override=log_override,
     )
-    def _build_mf_mode(*, apply_density_fit):
-        if ks_type == "RKS":
-            mf_mode = dft.RKS(mol_mode)
-        else:
-            mf_mode = dft.UKS(mol_mode)
-        mf_mode.xc = xc
-        density_fit_applied = False
-        if apply_density_fit:
-            mf_mode, df_config = apply_density_fit_setting(mf_mode, scf_config)
-            density_fit_applied = bool(df_config.get("density_fit"))
-        if solvent_model is not None:
-            mf_mode = apply_solvent_model(
-                mf_mode,
-                solvent_model,
-                solvent_name,
-                solvent_eps,
-            )
-        if verbose:
-            mf_mode.verbose = 4
-        mf_mode, _ = apply_scf_settings(mf_mode, scf_config, apply_density_fit=False)
-        return mf_mode, density_fit_applied
-
-    def _run_scf(mf_mode):
-        scf_start = time.perf_counter() if profiling else None
-        dm0, _ = apply_scf_checkpoint(mf_mode, scf_config, run_dir=run_dir)
-        if dm0 is not None:
-            mf_mode.kernel(dm0=dm0)
-        else:
-            mf_mode.kernel()
-        if scf_start is not None:
-            profiling["scf_seconds"] = (profiling["scf_seconds"] or 0.0) + (
-                time.perf_counter() - scf_start
-            )
-            cycles = extract_step_count(mf_mode)
-            if cycles is not None:
-                profiling["scf_cycles"] = (profiling["scf_cycles"] or 0) + cycles
-
-    mf_mode, density_fit_applied = _build_mf_mode(apply_density_fit=True)
-    _run_scf(mf_mode)
-    try:
-        hess_start = time.perf_counter() if profiling else None
-        if hasattr(mf_mode, "Hessian"):
-            hess = mf_mode.Hessian().kernel()
-        else:
-            hess = pyscf_hessian.Hessian(mf_mode).kernel()
-        if hess_start is not None:
-            profiling["hessian_seconds"] = (profiling["hessian_seconds"] or 0.0) + (
-                time.perf_counter() - hess_start
-            )
-    except Exception as exc:
-        if density_fit_applied and is_density_fit_gradient_einsum_error(exc):
-            logging.warning(
-                "Density-fitting Hessian failed; retrying without density fitting."
-            )
-            mf_mode, _ = _build_mf_mode(apply_density_fit=False)
-            _run_scf(mf_mode)
-            hess_start = time.perf_counter() if profiling else None
-            if hasattr(mf_mode, "Hessian"):
-                hess = mf_mode.Hessian().kernel()
-            else:
-                hess = pyscf_hessian.Hessian(mf_mode).kernel()
-            if hess_start is not None:
-                profiling["hessian_seconds"] = (profiling["hessian_seconds"] or 0.0) + (
-                    time.perf_counter() - hess_start
-                )
-        else:
-            raise
+    hess = _run_imaginary_mode_hessian_with_retry(
+        mol_mode=mol_mode,
+        dft_module=dft,
+        pyscf_hessian=pyscf_hessian,
+        xc=xc,
+        scf_config=scf_config,
+        solvent_model=solvent_model,
+        solvent_name=solvent_name,
+        solvent_eps=solvent_eps,
+        verbose=verbose,
+        ks_type=ks_type,
+        run_dir=run_dir,
+        profiling=profiling,
+    )
     if dispersion is not None:
-        positions = mol_mode.atom_coords(unit="Angstrom")
-        if hasattr(mol_mode, "atom_symbols"):
-            symbols = mol_mode.atom_symbols()
-        else:
-            symbols = [mol_mode.atom_symbol(i) for i in range(mol_mode.natm)]
-        atoms = Atoms(symbols=symbols, positions=positions)
-        dispersion_settings = parse_dispersion_settings(
-            dispersion,
-            xc,
-            charge=mol_mode.charge,
-            spin=mol_mode.spin,
-            d3_params=dispersion_params,
+        dispersion_hessian = _compute_imaginary_mode_dispersion_hessian(
+            mol_mode=mol_mode,
+            atoms_cls=Atoms,
+            units_module=units,
+            dispersion=dispersion,
+            xc=xc,
+            dispersion_hessian_step=dispersion_hessian_step,
+            dispersion_params=dispersion_params,
         )
-        backend = dispersion_settings["backend"]
-        settings = dispersion_settings["settings"]
-        if backend == "d3":
-            d3_cls, _ = load_d3_calculator()
-            if d3_cls is None:
-                raise ImportError(
-                    "DFTD3 dispersion requested but no DFTD3 calculator is available. "
-                    "Install `dftd3` (recommended)."
-                )
-            dispersion_calc = d3_cls(atoms=atoms, **settings)
-        else:
-            from dftd4.ase import DFTD4
-
-            dispersion_calc = DFTD4(atoms=atoms, **settings)
-        atoms.calc = dispersion_calc
-        step = dispersion_hessian_step if dispersion_hessian_step is not None else 0.005
-        base_positions = atoms.get_positions()
-        natoms = len(base_positions)
-        dispersion_hessian = np.zeros((natoms, natoms, 3, 3), dtype=float)
-        for atom_idx in range(natoms):
-            for coord in range(3):
-                pos_plus = base_positions.copy()
-                pos_plus[atom_idx, coord] += step
-                atoms.set_positions(pos_plus)
-                forces_plus = atoms.get_forces()
-                pos_minus = base_positions.copy()
-                pos_minus[atom_idx, coord] -= step
-                atoms.set_positions(pos_minus)
-                forces_minus = atoms.get_forces()
-                delta_forces = (forces_plus - forces_minus) / (2.0 * step)
-                dispersion_hessian[:, atom_idx, :, coord] = -delta_forces
-        atoms.set_positions(base_positions)
-        dispersion_hessian *= (1.0 / units.Hartree) / (units.Bohr ** 2)
         hess = hess + dispersion_hessian
 
-    if constraints:
-        positions = mol_mode.atom_coords(unit="Angstrom")
-        if hasattr(mol_mode, "atom_symbols"):
-            symbols = mol_mode.atom_symbols()
-        else:
-            symbols = [mol_mode.atom_symbol(i) for i in range(mol_mode.natm)]
-        atoms = Atoms(symbols=symbols, positions=positions)
-        jacobians = _collect_constraint_jacobians(atoms, constraints)
-        if jacobians is not None:
-            hess = _project_hessian_constraints(hess, mol_mode, jacobians)
+    hess = _apply_imaginary_mode_constraints(hess, mol_mode, Atoms, constraints)
 
     result = _extract_imaginary_mode_from_hessian(
         hess, mol_mode, atomic_masses, atomic_numbers
     )
-    if return_hessian:
-        result["hessian"] = hess
-    if profiling:
-        result["profiling"] = profiling
-    return result
+    return _finalize_imaginary_mode_result(
+        result,
+        hess=hess,
+        profiling=profiling,
+        return_hessian=return_hessian,
+    )
 
 
 def run_capability_check(
@@ -1891,20 +2298,8 @@ def run_capability_check(
 ):
     from pyscf import dft, hessian as pyscf_hessian
 
-    mol_check = mol.copy()
-    if basis:
-        mol_check.basis = basis
-        mol_check.build()
-    if memory_mb:
-        mol_check.max_memory = memory_mb
-    if dispersion is not None:
-        parse_dispersion_settings(
-            dispersion,
-            normalize_xc_functional(xc),
-            charge=mol_check.charge,
-            spin=mol_check.spin,
-            d3_params=dispersion_params,
-        )
+    mol_check = _prepare_capability_check_molecule(mol, basis, memory_mb)
+    _validate_capability_dispersion(mol_check, dispersion, xc, dispersion_params)
     ks_type = select_ks_type(
         mol=mol_check,
         scf_config=scf_config,
@@ -1912,88 +2307,34 @@ def run_capability_check(
         multiplicity=multiplicity,
         log_override=False,
     )
-    scf_override = dict(scf_config or {})
-    current_max = scf_override.get("max_cycle", max_scf_cycles)
-    scf_override["max_cycle"] = min(current_max, max_scf_cycles)
+    scf_override = _prepare_capability_scf_override(scf_config, max_scf_cycles)
 
     def build_mf_check(*, apply_density_fit):
-        if ks_type == "RKS":
-            mf_check = dft.RKS(mol_check)
-        else:
-            mf_check = dft.UKS(mol_check)
-        mf_check.xc = normalize_xc_functional(xc)
-        density_fit_applied = False
-        if apply_density_fit:
-            mf_check, df_config = apply_density_fit_setting(mf_check, scf_config)
-            density_fit_applied = bool(df_config.get("density_fit"))
-        if solvent_model is not None:
-            mf_check = apply_solvent_model(
-                mf_check,
-                solvent_model,
-                solvent_name,
-                solvent_eps,
-            )
-        if verbose:
-            mf_check.verbose = 4
-        mf_check, _ = apply_scf_settings(
-            mf_check, scf_override, apply_density_fit=False
+        return _build_capability_check_mf(
+            mol_check=mol_check,
+            dft_module=dft,
+            ks_type=ks_type,
+            xc=xc,
+            scf_config=scf_config,
+            scf_override=scf_override,
+            solvent_model=solvent_model,
+            solvent_name=solvent_name,
+            solvent_eps=solvent_eps,
+            verbose=verbose,
+            apply_density_fit=apply_density_fit,
         )
-        return mf_check, density_fit_applied
 
     mf_check, density_fit_applied = build_mf_check(apply_density_fit=True)
-    try:
-        mf_check.kernel()
-    except Exception as exc:
-        raise RuntimeError(
-            "Capability check failed during SCF. "
-            "The current XC/solvent/spin combination may be unsupported. "
-            "Review the SCF setup or choose a different solvent model."
-        ) from exc
-    try:
-        mf_check.nuc_grad_method().kernel()
-    except Exception as exc:
-        if density_fit_applied and is_density_fit_gradient_einsum_error(exc):
-            try:
-                mf_check, _ = build_mf_check(apply_density_fit=False)
-                mf_check.kernel()
-                mf_check.nuc_grad_method().kernel()
-                density_fit_applied = False
-            except Exception as retry_exc:
-                raise RuntimeError(
-                    "Capability check failed during nuclear gradient evaluation. "
-                    "The current XC/solvent/spin combination may not support gradients. "
-                    "Adjust the solvent model or use a PySCF build with gradient support."
-                ) from retry_exc
-        else:
-            raise RuntimeError(
-                "Capability check failed during nuclear gradient evaluation. "
-                "The current XC/solvent/spin combination may not support gradients. "
-                "Adjust the solvent model or use a PySCF build with gradient support."
-            ) from exc
+    _run_capability_scf_or_raise(mf_check)
+    mf_check, density_fit_applied = _run_capability_gradient_with_retry(
+        mf_check=mf_check,
+        density_fit_applied=density_fit_applied,
+        build_mf_check=build_mf_check,
+    )
     if require_hessian:
-        try:
-            if hasattr(mf_check, "Hessian"):
-                mf_check.Hessian().kernel()
-            else:
-                pyscf_hessian.Hessian(mf_check).kernel()
-        except Exception as exc:
-            if density_fit_applied and is_density_fit_gradient_einsum_error(exc):
-                try:
-                    mf_check, _ = build_mf_check(apply_density_fit=False)
-                    mf_check.kernel()
-                    if hasattr(mf_check, "Hessian"):
-                        mf_check.Hessian().kernel()
-                    else:
-                        pyscf_hessian.Hessian(mf_check).kernel()
-                except Exception as retry_exc:
-                    raise RuntimeError(
-                        "Capability check failed during Hessian evaluation. "
-                        "The current XC/solvent/spin combination may not support Hessians. "
-                        "Disable frequency calculations or use a compatible PySCF build."
-                    ) from retry_exc
-            else:
-                raise RuntimeError(
-                    "Capability check failed during Hessian evaluation. "
-                    "The current XC/solvent/spin combination may not support Hessians. "
-                    "Disable frequency calculations or use a compatible PySCF build."
-                ) from exc
+        _run_capability_hessian_with_retry(
+            mf_check=mf_check,
+            density_fit_applied=density_fit_applied,
+            build_mf_check=build_mf_check,
+            pyscf_hessian=pyscf_hessian,
+        )

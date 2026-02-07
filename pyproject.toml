@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dependencies = ["pydantic>=2.0", "PyYAML>=6.0"]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "mypy"]
+dev = ["mypy", "pytest", "pytest-cov", "ruff", "types-PyYAML"]
 
 [project.scripts]
 dftflow = "run_opt:main"
@@ -53,8 +53,17 @@ testpaths = ["tests"]
 norecursedirs = ["pyscf"]
 pythonpath = ["src"]
 
+[tool.coverage.run]
+branch = true
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+
 [tool.mypy]
 mypy_path = "src"
 python_version = "3.12"
 warn_unused_ignores = true
 disallow_untyped_defs = false
+ignore_missing_imports = true

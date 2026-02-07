@@ -24,6 +24,17 @@ conda activate dftflow
 dftflow run path/to/input.xyz --config run_config.yaml
 ```
 
+## Development Quality Checks
+
+```bash
+pip install -r requirements-dev.txt
+
+pytest -q
+pytest -q --cov=src --cov-report=term-missing
+ruff check src tests
+mypy src
+```
+
 GUI:
 
 - Desktop GUI is distributed separately (`dftflow_gui`).

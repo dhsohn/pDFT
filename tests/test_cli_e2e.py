@@ -92,3 +92,21 @@ def test_queue_cancel_updates_queue_file(tmp_path):
 
     updated_state = json.loads(queue_path.read_text(encoding="utf-8"))
     assert updated_state["entries"][0]["status"] == "canceled"
+
+
+def test_smoke_test_resume_requires_run_dir(tmp_path):
+    config_text = (REPO_ROOT / "run_config.json").read_text(encoding="utf-8")
+    (tmp_path / "run_config.json").write_text(config_text, encoding="utf-8")
+    result = run_cli(tmp_path, ["smoke-test", "--resume"])
+
+    assert result.returncode != 0
+    assert "--resume requires --run-dir for smoke-test." in result.stderr
+
+
+def test_smoke_test_watch_resume_requires_run_dir(tmp_path):
+    config_text = (REPO_ROOT / "run_config.json").read_text(encoding="utf-8")
+    (tmp_path / "run_config.json").write_text(config_text, encoding="utf-8")
+    result = run_cli(tmp_path, ["smoke-test", "--watch", "--resume"])
+
+    assert result.returncode != 0
+    assert "--resume requires --run-dir for smoke-test." in result.stderr

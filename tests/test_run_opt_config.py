@@ -63,3 +63,32 @@ def test_frequency_dispersion_step_requires_positive_value():
 
     with pytest.raises(ValueError):
         validate_run_config(config)
+
+
+def test_constraints_bonds_must_be_list():
+    config = {
+        "basis": "def2-svp",
+        "xc": "b3lyp",
+        "solvent": "vacuum",
+        "constraints": {"bonds": "invalid"},
+    }
+
+    with pytest.raises(
+        ValueError, match=r"Config 'constraints\.bonds' must be a list\."
+    ):
+        validate_run_config(config)
+
+
+def test_constraints_indices_must_be_nonnegative():
+    config = {
+        "basis": "def2-svp",
+        "xc": "b3lyp",
+        "solvent": "vacuum",
+        "constraints": {"bonds": [{"i": -1, "j": 0, "length": 1.1}]},
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"Config 'constraints\.bonds\[0\]\.i' must be >= 0\.",
+    ):
+        validate_run_config(config)

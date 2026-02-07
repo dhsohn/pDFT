@@ -18,7 +18,7 @@ from run_opt_engine import (
 )
 from run_opt_dispersion import load_d3_calculator, parse_dispersion_settings
 from run_opt_resources import ensure_parent_dir, resolve_run_path
-from run_opt_utils import extract_step_count
+from run_opt_utils import extract_step_count, normalize_constraints
 
 
 def _build_atom_spec_from_ase(atoms):
@@ -299,93 +299,14 @@ def _build_pyscf_calculator(
 
 
 def _apply_constraints(atoms, constraints):
-    if not constraints:
-        return
-    if not isinstance(constraints, dict):
-        raise ValueError("Config 'constraints' must be an object.")
-    bonds = constraints.get("bonds") or []
-    angles = constraints.get("angles") or []
-    dihedrals = constraints.get("dihedrals") or []
-    if not bonds and not angles and not dihedrals:
-        return
-
     from ase.constraints import FixAngle, FixBondLength, FixDihedral, FixInternals
 
-    atom_count = len(atoms)
-
-    def _validate_index(value, path):
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ValueError(f"{path} must be an integer.")
-        if value < 0 or value >= atom_count:
-            raise ValueError(
-                f"{path} index {value} is out of range for {atom_count} atoms."
-            )
-
-    def _validate_number(value, path):
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise ValueError(f"{path} must be a number.")
-
-    bond_entries = []
-    for idx, bond in enumerate(bonds):
-        if not isinstance(bond, dict):
-            raise ValueError(f"constraints.bonds[{idx}] must be an object.")
-        for key in ("i", "j"):
-            if key not in bond:
-                raise ValueError(f"constraints.bonds[{idx}] must define '{key}'.")
-            _validate_index(bond[key], f"constraints.bonds[{idx}].{key}")
-        if "length" not in bond:
-            raise ValueError(f"constraints.bonds[{idx}] must define 'length'.")
-        _validate_number(bond["length"], f"constraints.bonds[{idx}].length")
-        if bond["length"] <= 0:
-            raise ValueError(
-                f"constraints.bonds[{idx}].length must be > 0 (Angstrom)."
-            )
-        bond_entries.append((bond["i"], bond["j"], float(bond["length"])))
-
-    angle_entries = []
-    for idx, angle in enumerate(angles):
-        if not isinstance(angle, dict):
-            raise ValueError(f"constraints.angles[{idx}] must be an object.")
-        for key in ("i", "j", "k"):
-            if key not in angle:
-                raise ValueError(f"constraints.angles[{idx}] must define '{key}'.")
-            _validate_index(angle[key], f"constraints.angles[{idx}].{key}")
-        if "angle" not in angle:
-            raise ValueError(f"constraints.angles[{idx}] must define 'angle'.")
-        _validate_number(angle["angle"], f"constraints.angles[{idx}].angle")
-        if not (0 < angle["angle"] <= 180):
-            raise ValueError(
-                f"constraints.angles[{idx}].angle must be between 0 and 180 degrees."
-            )
-        angle_entries.append(
-            (angle["i"], angle["j"], angle["k"], float(angle["angle"]))
-        )
-
-    dihedral_entries = []
-    for idx, dihedral in enumerate(dihedrals):
-        if not isinstance(dihedral, dict):
-            raise ValueError(f"constraints.dihedrals[{idx}] must be an object.")
-        for key in ("i", "j", "k", "l"):
-            if key not in dihedral:
-                raise ValueError(f"constraints.dihedrals[{idx}] must define '{key}'.")
-            _validate_index(dihedral[key], f"constraints.dihedrals[{idx}].{key}")
-        if "dihedral" not in dihedral:
-            raise ValueError(f"constraints.dihedrals[{idx}] must define 'dihedral'.")
-        _validate_number(dihedral["dihedral"], f"constraints.dihedrals[{idx}].dihedral")
-        if not (-180 <= dihedral["dihedral"] <= 180):
-            raise ValueError(
-                "constraints.dihedrals[{idx}].dihedral must be between -180 and 180 "
-                "degrees.".format(idx=idx)
-            )
-        dihedral_entries.append(
-            (
-                dihedral["i"],
-                dihedral["j"],
-                dihedral["k"],
-                dihedral["l"],
-                float(dihedral["dihedral"]),
-            )
-        )
+    bond_entries, angle_entries, dihedral_entries = normalize_constraints(
+        constraints,
+        atom_count=len(atoms),
+    )
+    if not bond_entries and not angle_entries and not dihedral_entries:
+        return
 
     if (
         (len(bond_entries) + len(angle_entries) + len(dihedral_entries)) > 1
